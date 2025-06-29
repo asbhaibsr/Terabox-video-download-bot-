@@ -1,5 +1,5 @@
-pyrogram==2.0.106 # Or latest stable version if available
+pyrogram==2.0.106 # या 2.0.100 के ऊपर का कोई भी वर्ज़न
+PyYAML==6.0.1
+youtube-dlp==2023.10.13
 pymongo==4.7.1
-dnspython==2.6.0
-yt-dlp
-TgCrypto==1.2.5
+dnspython==2.6.1
