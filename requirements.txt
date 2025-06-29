@@ -1,5 +1,5 @@
 pyrogram==2.0.106 # Or latest stable version if available
 pymongo==4.7.1
 dnspython==2.6.0
-yt-dlp==2024.06.27
+yt-dlp
 TgCrypto==1.2.5
