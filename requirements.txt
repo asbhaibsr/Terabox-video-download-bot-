@@ -1,5 +1,3 @@
-pyrogram==2.0.106
-PyYAML==6.0.1
-youtube-dlp==2024.04.09 # यह एक हालिया स्टेबल वर्ज़न है जो Python 3.12 को सपोर्ट करता है
-pymongo==4.7.1
-dnspython==2.6.1
+Flask==2.3.2
+gunicorn==21.2.0
+youtube-dlp
