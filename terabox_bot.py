@@ -8,7 +8,7 @@ from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait, MessageNotModified
 from yt_dlp import YoutubeDL
-import re
+import re # Make sure 're' is imported, which it is
 import shutil
 
 # --- Configuration ---
@@ -158,10 +158,10 @@ async def help_command(client, message):
         "💎 `/premium` - प्रीमियम प्लान्स देखें.\n"
         "📊 `/botstats` - बॉट की रिपोर्ट देखें.\n"
         "💡 `/help` - यह हेल्प मैसेज.\n\n"
-        "एडमिन कमांड्स (सिर्फ़ मेरे मालिक के लिए 😉):\n"
-        "👤 `/addpremium <user_id> <days>` - किसी यूज़र को प्रीमियम दें.\n"
-        "📊 `/checkpremiumstats` - प्रीमियम यूज़र्स की जानकारी.\n"
-        "📢 `/broadcast <message>` - सभी यूज़र्स को मैसेज भेजें.\n",
+        "एडमिन कमांड्स (सिर्फ़ मेरे मालिक के लिए 😉):\n"
+        "👤 `/addpremium <user_id> <days>` - किसी यूज़र को प्रीमियम दें.\n"
+        "📊 `/checkpremiumstats` - प्रीमियम यूज़र्स की जानकारी.\n"
+        "📢 `/broadcast <message>` - सभी यूज़र्स को मैसेज भेजें.\n",
         reply_markup=keyboard
     )
 
@@ -194,7 +194,7 @@ async def add_premium_command(client, message):
 
     if current_expiry and current_expiry > datetime.datetime.now():
         new_expiry = current_expiry + datetime.timedelta(days=days)
-        message_text = f"प्रीमियम बढ़ाया गया! `{user_id}` का प्रीमियम अब **{new_expiry.strftime('%d-%m-%Y %H:%M:%S')}** तक वैलिड है."
+        message_text = f"प्रीमियम बढ़ाया गया! `{user_id}` का प्रीमियम अब **{new_expiry.strftime('%d-%m-%Y %H:%M:%S')}** तक वैलिड है."
     else:
         new_expiry = datetime.datetime.now() + datetime.timedelta(days=days)
         message_text = f"प्रीमियम एक्टिवेट किया गया! `{user_id}` का प्रीमियम अब **{new_expiry.strftime('%d-%m-%Y %H:%M:%S')}** तक वैलिड है."
@@ -212,14 +212,14 @@ async def add_premium_command(client, message):
         )
     except Exception as e:
         logger.warning(f"Could not notify user {user_id} about premium activation: {e}")
-        await message.reply_text(f"यूज़र को नोटिफाई नहीं कर पाया: {e}")
+        await message.reply_text(f"यूज़र को नोटिफाई नहीं कर पाया: {e}")
 
 
 @app.on_message(filters.command("checkpremiumstats") & filters.private & filters.create(is_admin))
 async def check_premium_stats_command(client, message):
     premium_users = users_collection.find({"is_premium": True, "premium_expiry": {"$gt": datetime.datetime.now()}})
     
-    stats_message = "💎 **प्रीमियम यूज़र्स की जानकारी:**\n\n"
+    stats_message = "💎 **प्रीमियम यूज़र्स की जानकारी:**\n\n"
     count = 0
     for user in premium_users:
         count += 1
@@ -228,7 +228,7 @@ async def check_premium_stats_command(client, message):
         stats_message += f"👤 ID: `{user_id}` | एक्सपायरी: `{expiry}`\n"
     
     if count == 0:
-        stats_message += "अभी कोई एक्टिव प्रीमियम यूज़र नहीं है."
+        stats_message += "अभी कोई एक्टिव प्रीमियम यूज़र नहीं है."
 
     await message.reply_text(stats_message)
 
@@ -249,14 +249,14 @@ async def broadcast_command(client, message):
     for user in all_users:
         user_id = user["_id"]
         try:
-            await app.send_message(user_id, f"📢 **बॉट का ज़रूरी मैसेज:**\n\n{broadcast_message}")
+            await app.send_message(user_id, f"📢 **बॉट का ज़रूरी मैसेज:**\n\n{broadcast_message}")
             success_count += 1
             await asyncio.sleep(0.1) # Small delay to avoid flood waits
         except FloodWait as e:
             logger.warning(f"FloodWait encountered. Sleeping for {e.value} seconds.")
             await asyncio.sleep(e.value + 5) # Add extra buffer
             try: # Try again after flood wait
-                await app.send_message(user_id, f"📢 **बॉट का ज़रूरी मैसेज:**\n\n{broadcast_message}")
+                await app.send_message(user_id, f"📢 **बॉट का ज़रूरी मैसेज:**\n\n{broadcast_message}")
                 success_count += 1
             except Exception:
                 fail_count += 1
@@ -309,19 +309,19 @@ async def callback_handler(client, callback_query):
         selected_plan = PREMIUM_PLANS.get(plan_key)
         if selected_plan:
             await message.edit_text(
-                f"💎 आपने **{selected_plan['description']}** प्लान चुना है. इसकी क़ीमत ₹{selected_plan['price']} है.\n\n"
+                f"💎 आपने **{selected_plan['description']}** प्लान चुना है. इसकी क़ीमत ₹{selected_plan['price']} है.\n\n"
                 f"हमारे UPI ID पर पेमेंट करें: `{UPI_ID}`\n\n"
                 "पेमेंट करने के बाद, पेमेंट का **स्क्रीनशॉट मुझे भेजें.** मेरे मालिक उसे देखकर आपका प्रीमियम एक्टिवेट कर देंगे! "
-                "पेमेंट होने के बाद धैर्य रखें, इसमें थोड़ा समय लग सकता है.",
+                "पेमेंट होने के बाद धैर्य रखें, इसमें थोड़ा समय लग सकता है.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔙 वापस", callback_data="premium_plans")]
                 ])
             )
         else:
             await message.edit_text("ऊप्स! यह प्लान नहीं मिला. फिर से कोशिश करें.",
-                                    reply_markup=InlineKeyboardMarkup([
-                                        [InlineKeyboardButton("🔙 वापस", callback_data="premium_plans")]
-                                    ]))
+                                     reply_markup=InlineKeyboardMarkup([
+                                         [InlineKeyboardButton("🔙 वापस", callback_data="premium_plans")]
+                                     ]))
     elif data == "help_menu":
         # Edit message to help content
         await message.edit_text(
@@ -331,10 +331,10 @@ async def callback_handler(client, callback_query):
             "💎 `/premium` - प्रीमियम प्लान्स देखें.\n"
             "📊 `/botstats` - बॉट की रिपोर्ट देखें.\n"
             "💡 `/help` - यह हेल्प मैसेज.\n\n"
-            "एडमिन कमांड्स (सिर्फ़ मेरे मालिक के लिए 😉):\n"
-            "👤 `/addpremium <user_id> <days>` - किसी यूज़र को प्रीमियम दें.\n"
-            "📊 `/checkpremiumstats` - प्रीमियम यूज़र्स की जानकारी.\n"
-            "📢 `/broadcast <message>` - सभी यूज़र्स को मैसेज भेजें.\n",
+            "एडमिन कमांड्स (सिर्फ़ मेरे मालिक के लिए 😉):\n"
+            "👤 `/addpremium <user_id> <days>` - किसी यूज़र को प्रीमियम दें.\n"
+            "📊 `/checkpremiumstats` - प्रीमियम यूज़र्स की जानकारी.\n"
+            "📢 `/broadcast <message>` - सभी यूज़र्स को मैसेज भेजें.\n",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🚀 अभी डाउनलोड करो!", callback_data="download_menu")],
                 [InlineKeyboardButton("🔙 वापस", callback_data="start_menu")]
@@ -354,9 +354,9 @@ async def show_premium_plans(client, message):
     text = "💎 **प्रीमियम प्लान्स:**\n\n"
     if is_premium:
         expiry_date = user["premium_expiry"].strftime('%d-%m-%Y %H:%M:%S')
-        text += f"आप पहले से प्रीमियम यूज़र हैं! आपका प्रीमियम {expiry_date} तक वैलिड है. मौज करो! 🎉\n\n"
+        text += f"आप पहले से प्रीमियम यूज़र हैं! आपका प्रीमियम {expiry_date} तक वैलिड है. मौज करो! 🎉\n\n"
     else:
-        text += "फ़्री यूज़र्स के लिए रोज़ 3 डाउनलोड की लिमिट है.\n"
+        text += "फ़्री यूज़र्स के लिए रोज़ 3 डाउनलोड की लिमिट है.\n"
         text += "प्रीमियम से पाएं **अनलिमिटेड डाउनलोड**, कोई लिमिट नहीं!\n\n"
         text += "अपनी पसंद का प्लान चुनें:\n\n"
 
@@ -382,8 +382,8 @@ async def show_bot_stats(client, message):
 
     stats_text = (
         f"📊 **बॉट की रिपोर्ट:**\n\n"
-        f"👥 कुल यूज़र्स: **{total_users}**\n"
-        f"💎 एक्टिव प्रीमियम यूज़र्स: **{premium_users_count}**\n"
+        f"👥 कुल यूज़र्स: **{total_users}**\n"
+        f"💎 एक्टिव प्रीमियम यूज़र्स: **{premium_users_count}**\n"
         f"⬇️ कुल डाउनलोड किए गए वीडियो: **{total_downloads}**\n\n"
         "बॉट का स्टेटस: 🚀 रॉकेट की तरह चल रहा है!"
     )
@@ -396,8 +396,8 @@ async def show_bot_stats(client, message):
 
 # --- Handle Incoming Terabox Links ---
 
-# Regex for Terabox links, with flags=0 for Python 3.12 compatibility
-@app.on_message(filters.regex(r"https?://(?:www\.)?(terabox|nephobox|kofile|mirrobox|momoradar|www.4funbox\.com|www.sukifiles\.com|www.terabox\.com|www.teraboxapp\.com|teraboxapp\.com|terabox\.com|www.4hfile\.com|www.rapidgator\.net|www.kufile\.net|www.pandafiles\.com|www.subyshare\.com|www.filepress\.com|filepress\.com|m.terabox\.com)\.(com|app|net|cc|co|xyz|me|live|cloud|jp|ru|io|pw|site|online|ga|ml|tk|ai|info|store|shop|org|biz|club|fun|pro|sbs|digital|solutions|host|website|tech|dev|page|buzz|guru|news|press|top|blog|art|media|zone|icu|wiki|photos|tube|games|social|group|network|link|center|studio|design|agency|market|events|gallery|house|land|life|today|world|city|estate|fund|gold|health|inc|solutions|systems|tools|ventures|vodka|wedding|work|yoga|zone|academy|accountant|ad|ads|agency|ai|air|apartments|app|archi|associates|attorney|au|band|bar|bargains|beer|best|bid|bike|bio|biz|black|blog|blue|boutique|build|builders|business|cab|cafe|cam|camera|camp|capital|car|cards|care|careers|casa|cash|casino|catering|cc|center|ceo|church|city|claims|cleaning|clinic|clothing|cloud|coach|codes|coffee|college|community|company|computer|condos|construction|consulting|contractors|cool|coupons|credit|creditcard|cruises|dad|dance|data|date|deals|delivery|democrat|dental|design|diamonds|diet|digital|direct|directory|discount|doctor|dog|domains|education|email|energy|engineer|engineering|enterprises|equipment|estate|events|exchange|expert|express|faith|family|fan|farm|fashion|film|finance|financial|firm|fitness|flights|florist|flowers|football|forsale|foundation|fund|furniture|fyi|gallery|games|garden|gay|gent|gifts|gives|glass|global|gold|golf|graphics|gratis|green|gripe|guide|guitars|guru|haus|health|healthcare|help|here|hiphop|holdings|holiday|homes|horse|host|hosting|house|how|id|industries|info|ink|institute|insurance|insure|international|investments|irish|is|jetzt|jewelry|job|jobs|join|juegos|kaufen|kim|kitchen|land|lease|legal|lgbt|life|lighting|limited|live|llc|loan|loans|lol|london|ltd|maison|management|marketing|mba|media|memorial|men|menu|mobi|moda|moe|money|mortgage|mov|movie|museum|name|navy|network|new|news|ninja|nyc|okinawa|one|online|ooo|organic|partners|parts|party|photo|photography|photos|pics|pictures|pink|pizza|place|plumbing|plus|poker|porn|press|pro|productions|prof|properties|property|pub|qa|quebec|racing|recipes|red|rehab|reise|reisen|rent|rentals|repair|report|republican|restaurant|reviews|rip|rocks|rodeo|run|sarl|school|schule|science|scot|security|services|sex|sexy|shiksha|shoes|shop|shopping|show|singles|site|ski|soccer|social|software|solar|solutions|soy|space|studio|style|sucks|supplies|supply|support|surf|surgery|sydney|systems|tax|taxi|team|tech|technology|tel|telecom|tennis|theater|tickets|tienda|tips|tires|today|tools|tours|town|toys|trade|training|travel|tube|university|uno|vacations|ventures|vet|viajes|video|villas|vin|vision|vodka|vote|voting|voto|voyage|wales|wang|watch|webcam|website|wed|wedding|whoswho|wiki|win|wine|work|works|world|wtf|xyz|yachts|ye|yoga|zara)/[a-zA-Z0-9]+", filters.private))
+# Regex for Terabox links, with embedded (?i) for IGNORECASE flag
+@app.on_message(filters.regex(r"(?i)https?://(?:www\.)?(terabox|nephobox|kofile|mirrobox|momoradar|www.4funbox\.com|www.sukifiles\.com|www.terabox\.com|www.teraboxapp\.com|teraboxapp\.com|terabox\.com|www.4hfile\.com|www.rapidgator\.net|www.kufile\.net|www.pandafiles\.com|www.subyshare\.com|www.filepress\.com|filepress\.com|m.terabox\.com)\.(com|app|net|cc|co|xyz|me|live|cloud|jp|ru|io|pw|site|online|ga|ml|tk|ai|info|store|shop|org|biz|club|fun|pro|sbs|digital|solutions|host|website|tech|dev|page|buzz|guru|news|press|top|blog|art|media|zone|icu|wiki|photos|tube|games|social|group|network|link|center|studio|design|agency|market|events|gallery|house|land|life|today|world|city|estate|fund|gold|health|inc|solutions|systems|tools|ventures|vodka|wedding|work|yoga|zone|academy|accountant|ad|ads|agency|ai|air|apartments|app|archi|associates|attorney|au|band|bar|bargains|beer|best|bid|bike|bio|biz|black|blog|blue|boutique|build|builders|business|cab|cafe|cam|camera|camp|capital|car|cards|care|careers|casa|cash|casino|catering|cc|center|ceo|church|city|claims|cleaning|clinic|clothing|cloud|coach|codes|coffee|college|community|company|computer|condos|construction|consulting|contractors|cool|coupons|credit|creditcard|cruises|dad|dance|data|date|deals|delivery|democrat|dental|design|diamonds|diet|digital|direct|directory|discount|doctor|dog|domains|education|email|energy|engineer|engineering|enterprises|equipment|estate|events|exchange|expert|express|faith|family|fan|farm|fashion|film|finance|financial|firm|fitness|flights|florist|flowers|football|forsale|foundation|fund|furniture|fyi|gallery|games|garden|gay|gent|gifts|gives|glass|global|gold|golf|graphics|gratis|green|gripe|guide|guitars|guru|haus|health|healthcare|help|here|hiphop|holdings|holiday|homes|horse|host|hosting|house|how|id|industries|info|ink|institute|insurance|insure|international|investments|irish|is|jetzt|jewelry|job|jobs|join|juegos|kaufen|kim|kitchen|land|lease|legal|lgbt|life|lighting|limited|live|llc|loan|loans|lol|london|ltd|maison|management|marketing|mba|media|memorial|men|menu|mobi|moda|moe|money|mortgage|mov|movie|museum|name|navy|network|new|news|ninja|nyc|okinawa|one|online|ooo|organic|partners|parts|party|photo|photography|photos|pics|pictures|pink|pizza|place|plumbing|plus|poker|porn|press|pro|productions|prof|properties|property|pub|qa|quebec|racing|recipes|red|rehab|reise|reisen|rent|rentals|repair|report|republican|restaurant|reviews|rip|rocks|rodeo|run|sarl|school|schule|science|scot|security|services|sex|sexy|shiksha|shoes|shop|shopping|show|singles|site|ski|soccer|social|software|solar|solutions|soy|space|studio|style|sucks|supplies|supply|support|surf|surgery|sydney|systems|tax|taxi|team|tech|technology|tel|telecom|tennis|theater|tickets|tienda|tips|tires|today|tools|tours|town|toys|trade|training|travel|tube|university|uno|vacations|ventures|vet|viajes|video|villas|vin|vision|vodka|vote|voting|voto|voyage|wales|wang|watch|webcam|website|wed|wedding|whoswho|wiki|win|wine|work|works|world|wtf|xyz|yachts|ye|yoga|zara)/[a-zA-Z0-9]+", filters.private))
 async def handle_terabox_link(client, message):
     user_id = message.from_user.id
     terabox_link = message.text
@@ -415,7 +415,7 @@ async def handle_terabox_link(client, message):
     if not is_premium and user["daily_downloads"] >= FREE_DOWNLOAD_LIMIT:
         await message.reply_text(
             f"🚫 ओह नो! आपकी आज की {FREE_DOWNLOAD_LIMIT} डाउनलोड लिमिट पूरी हो गई है. "
-            "ज़्यादा डाउनलोड के लिए प्रीमियम ले लो या कल फिर ट्राई करना!"
+            "ज़्यादा डाउनलोड के लिए प्रीमियम ले लो या कल फिर ट्राई करना!"
             "\n\n💎 प्रीमियम प्लान्स देखने के लिए /premium दबाएं.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("💎 प्रीमियम प्लान्स", callback_data="premium_plans")],
@@ -425,9 +425,9 @@ async def handle_terabox_link(client, message):
         return
 
     status_message = await message.reply_text(
-        f"🔗 लिंक मिल गया! मैं इसे स्कैन कर रहा हूँ, रुको ज़रा... "
+        f"🔗 लिंक मिल गया! मैं इसे स्कैन कर रहा हूँ, रुको ज़रा... "
         f"(`{terabox_link}`)\n\n"
-        "यह प्रक्रिया थोड़ी देर ले सकती है, धैर्य रखें."
+        "यह प्रक्रिया थोड़ी देर ले सकती है, धैर्य रखें."
     )
 
     try:
@@ -502,7 +502,7 @@ async def handle_terabox_link(client, message):
                  f"एरर: `{e}`. कृपया कोड जांचें."
              )
         await status_message.edit_text(
-            f"😥 ओह! इस लिंक से वीडियो नहीं मिल रहा है या कुछ गड़बड़ हो गई है. "
+            f"😥 ओह! इस लिंक से वीडियो नहीं मिल रहा है या कुछ गड़बड़ हो गई है. "
             "कृपया सही टेराबॉक्स लिंक भेजें या बाद में कोशिश करें.\n\n"
             f"**एरर:** `{e}`"
         )
@@ -518,7 +518,7 @@ async def download_selected_quality(client, callback_query):
     # Example: download_quality_https://terabox.com/s/abcdef_formatid
     parts = data.split('_', 2) # Splits 'download', 'quality', and 'rest_of_string'
     if len(parts) < 3:
-        await message.edit_text("कुछ गड़बड़ हो गई. कृपया फिर से कोशिश करें.")
+        await message.edit_text("कुछ गड़बड़ हो गई. कृपया फिर से कोशिश करें.")
         await callback_query.answer()
         return
 
@@ -553,7 +553,7 @@ async def download_selected_quality(client, callback_query):
     if not is_premium and user["daily_downloads"] >= FREE_DOWNLOAD_LIMIT:
         await message.edit_text(
             f"🚫 ओह नो! आपकी आज की {FREE_DOWNLOAD_LIMIT} डाउनलोड लिमिट पूरी हो गई है. "
-            "ज़्यादा डाउनलोड के लिए प्रीमियम ले लो या कल फिर ट्राई करना!"
+            "ज़्यादा डाउनलोड के लिए प्रीमियम ले लो या कल फिर ट्राई करना!"
             "\n\n💎 प्रीमियम प्लान्स देखने के लिए /premium दबाएं.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("💎 प्रीमियम प्लान्स", callback_data="premium_plans")],
@@ -567,7 +567,7 @@ async def download_selected_quality(client, callback_query):
     await callback_query.answer("आपका डाउनलोड शुरू हो रहा है! कृपया धैर्य रखें...")
 
     try:
-        info_message = await message.edit_text("🚀 आपका डाउनलोड शुरू हो रहा है! कृपया इंतज़ार करें...")
+        info_message = await message.edit_text("🚀 आपका डाउनलोड शुरू हो रहा है! कृपया इंतज़ार करें...")
         
         # Use a temporary filename unique to the user and download to avoid conflicts
         temp_filename = f"{user_id}_{int(time.time())}" # Unique temp name
@@ -609,14 +609,14 @@ async def download_selected_quality(client, callback_query):
         # Telegram file size limit for non-premium is 2GB
         if file_size_mb > 2000 and not is_premium: 
             await info_message.edit_text(
-                f"Oops! 😅 यह फ़ाइल **{file_size_mb:.2f} MB** की है, जो Telegram की फ़्री लिमिट (2GB) से ज़्यादा है.\n"
+                f"Oops! 😅 यह फ़ाइल **{file_size_mb:.2f} MB** की है, जो Telegram की फ़्री लिमिट (2GB) से ज़्यादा है.\n"
                 "बड़ी फ़ाइलें डाउनलोड करने और भेजने के लिए **प्रीमियम** लें!"
             )
             os.remove(filepath) # Delete large file
             return
 
         # Send the file
-        await info_message.edit_text(f"🥳 डाउनलोड पूरा हो गया! अब मैं फ़ाइल भेज रहा हूँ...")
+        await info_message.edit_text(f"🥳 डाउनलोड पूरा हो गया! अब मैं फ़ाइल भेज रहा हूँ...")
 
         start_time = time.time()
         try:
@@ -636,11 +636,11 @@ async def download_selected_quality(client, callback_query):
 
     except FloodWait as e:
         logger.warning(f"FloodWait while downloading/sending. Sleeping for {e.value} seconds.")
-        await info_message.edit_text(f"टेलीग्राम की तरफ़ से थोड़ी देर के लिए रुकावट है. {e.value} सेकंड बाद फिर कोशिश करूँगा.")
+        await info_message.edit_text(f"टेलीग्राम की तरफ़ से थोड़ी देर के लिए रुकावट है. {e.value} सेकंड बाद फिर कोशिश करूँगा.")
         await asyncio.sleep(e.value + 5) # Add extra buffer
     except Exception as e:
         logger.error(f"Error during download or sending for user {user_id}: {e}")
-        error_msg = f"😥 अरे यार! डाउनलोड या भेजने में कुछ गड़बड़ हो गई: `{e}`\n"
+        error_msg = f"😥 अरे यार! डाउनलोड या भेजने में कुछ गड़बड़ हो गई: `{e}`\n"
         if "No video formats" in str(e) or "Unsupported URL" in str(e).lower():
             error_msg = "😥 यह टेराबॉक्स लिंक काम नहीं कर रहा है या इसमें वीडियो नहीं है. " \
                         "कृपया सही लिंक भेजें."
@@ -657,129 +657,70 @@ async def download_selected_quality(client, callback_query):
                 logger.info(f"Deleted downloaded file: {filepath}")
             except OSError as e:
                 logger.error(f"Error deleting file {filepath}: {e}")
-        # Clean up the parent directory if it's empty and was created by yt-dlp's output template
-        # (yt-dlp sometimes creates sub-directories, though not expected with this outtmpl)
-        if DOWNLOAD_DIR and os.path.exists(DOWNLOAD_DIR):
-            try:
-                # Remove empty subdirectories if any, not the main DOWNLOAD_DIR
-                for root, dirs, files in os.walk(DOWNLOAD_DIR, topdown=False):
-                    for d in dirs:
-                        dir_path = os.path.join(root, d)
-                        if not os.listdir(dir_path): # Check if directory is empty
-                            shutil.rmtree(dir_path)
-            except OSError as e:
-                logger.error(f"Error cleaning up directories in {DOWNLOAD_DIR}: {e}")
+        # Clean up the parent directory if 
 
+# --- Progress Hooks (These are crucial for showing download/upload progress) ---
 
-# --- Progress Hooks for Download and Upload ---
-# Store last update time for throttling
-last_dl_update_time = {}
-last_ul_update_time = {}
-
-async def download_progress_hook(d, message_obj):
-    """Updates download progress in real-time."""
-    chat_id = message_obj.chat.id
-    current_time = time.time()
-
-    if chat_id not in last_dl_update_time:
-        last_dl_update_time[chat_id] = 0
-
-    if (current_time - last_dl_update_time[chat_id]) < 3: # Update every 3 seconds
-        return
-
+# This needs to be defined outside the scope of handle_terabox_link
+# Also, it needs `app` as an argument if you want to use it for message editing.
+async def download_progress_hook(d, message):
     if d['status'] == 'downloading':
         total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
         downloaded_bytes = d.get('downloaded_bytes', 0)
         
         if total_bytes > 0:
-            percentage = (downloaded_bytes / total_bytes) * 100
+            percentage = downloaded_bytes / total_bytes * 100
+            speed = d.get('speed', 0)
+            eta = d.get('eta', 0)
+
+            progress_bar = f"[{'█' * int(percentage // 10)}{'░' * (10 - int(percentage // 10))}]"
+            
             try:
-                await message_obj.edit_text(
-                    f"⬇️ डाउनलोड हो रहा है... **{percentage:.2f}%**\n"
-                    f" (`{downloaded_bytes / (1024*1024):.2f} MB` / `{total_bytes / (1024*1024):.2f} MB`)"
+                await message.edit_text(
+                    f"⬇️ **डाउनलोड हो रहा है...**\n\n"
+                    f"प्रोग्रेस: `{progress_bar} {percentage:.1f}%`\n"
+                    f"स्पीड: `{speed / 1024:.2f} KiB/s`\n"
+                    f"अनुमानित समय: `{str(datetime.timedelta(seconds=int(eta)))}`",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("कैंसिल करें", callback_data="cancel_download")]
+                    ])
                 )
-                last_dl_update_time[chat_id] = current_time
             except MessageNotModified:
-                pass # Ignore if message content is the same
-            except Exception as e:
-                logger.warning(f"Error updating download progress message: {e}")
+                pass # Ignore if the message hasn't changed enough to warrant an edit
 
-async def send_progress_hook(current, total, message_obj, start_time):
-    """Updates upload progress in real-time."""
-    chat_id = message_obj.chat.id
-    current_time = time.time()
+async def send_progress_hook(current, total, message, start_time):
+    if not start_time:
+        return # Ensure start_time is set
 
-    if chat_id not in last_ul_update_time:
-        last_ul_update_time[chat_id] = 0
-
-    if (current_time - last_ul_update_time[chat_id]) < 3: # Update every 3 seconds
-        return
-
-    percentage = (current / total) * 100
-    try:
-        await message_obj.edit_text(
-            f"⬆️ फ़ाइल अपलोड हो रही है... **{percentage:.2f}%**\n"
-            f" (`{current / (1024*1024):.2f} MB` / `{total / (1024*1024):.2f} MB`)"
-        )
-        last_ul_update_time[chat_id] = current_time
-    except MessageNotModified:
-        pass # Ignore if message content is the same
-    except Exception as e:
-        logger.warning(f"Error updating upload progress message: {e}")
-
-# --- Handle Screenshot Payments (Admin Notification) ---
-
-@app.on_message(filters.photo & filters.private)
-async def handle_screenshot(client, message):
-    user_id = message.from_user.id
-    caption = message.caption
+    now = time.time()
+    elapsed_time = now - start_time
     
-    # Check if the photo caption indicates a payment screenshot
-    # Or if it's just a photo from user who recently requested premium
-    user = await get_user_data(user_id)
-    
-    # Heuristic: If user has 'buy_premium' in last 5 minutes AND sends a photo, it's likely a screenshot
-    # For a robust system, you might add a 'waiting_for_payment_screenshot' flag in DB
-    is_recent_premium_request = False # You would need to track this in DB based on callback data
-    
-    if (caption and ("payment" in caption.lower() or "screenshot" in caption.lower())) or \
-       (message.reply_to_message and message.reply_to_message.from_user.is_self and "UPI ID" in message.reply_to_message.text): # Check if replying to bot's UPI message
-        
-        # Forward the screenshot to the admin
-        await client.send_photo(
-            chat_id=ADMIN_ID,
-            photo=message.photo.file_id,
-            caption=f"💰 **नया पेमेंट स्क्रीनशॉट!**\n\n"
-                    f"यूज़र ID: `{user_id}`\n"
-                    f"यूज़र का नाम: `{message.from_user.first_name}`\n"
-                    f"यूज़र का यूज़रनेम: @{message.from_user.username or 'N/A'}\n\n"
-                    "एडमिन, प्रीमियम एक्टिवेट करने के लिए `/addpremium` कमांड का उपयोग करें."
-        )
-        await message.reply_text(
-            "👍 आपका पेमेंट स्क्रीनशॉट मेरे मालिक को भेज दिया गया है! "
-            "धैर्य रखें, वे जल्द ही आपका प्रीमियम एक्टिवेट कर देंगे."
-        )
+    if elapsed_time > 0:
+        speed = current / elapsed_time
     else:
-        # If it's just a random photo, don't forward to admin unless it's explicitly a screenshot
-        await message.reply_text("मुझे समझ नहीं आया. क्या यह पेमेंट स्क्रीनशॉट है? अगर हाँ, तो कृपया कैप्शन में 'screenshot' लिखें या पेमेंट वाले मैसेज का जवाब दें.")
+        speed = 0
+
+    if total > 0:
+        percentage = current * 100 / total
+    else:
+        percentage = 0
+    
+    progress_bar = f"[{'█' * int(percentage // 10)}{'░' * (10 - int(percentage // 10))}]"
+    
+    try:
+        await message.edit_text(
+            f"⬆️ **भेजा जा रहा है...**\n\n"
+            f"प्रोग्रेस: `{progress_bar} {percentage:.1f}%`\n"
+            f"भेजा गया: `{current / (1024 * 1024):.2f} MB` / `{total / (1024 * 1024):.2f} MB`\n"
+            f"स्पीड: `{speed / 1024:.2f} KiB/s`\n"
+            f"बीता हुआ समय: `{str(datetime.timedelta(seconds=int(elapsed_time)))}`"
+        )
+    except MessageNotModified:
+        pass # Ignore if the message hasn't changed enough to warrant an edit
 
 # --- Main Bot Runner ---
-async def main():
-    logger.info("Starting Terabox Downloader Bot...")
-    # Start the periodic reset task
-    asyncio.create_task(reset_daily_downloads_task())
-    await app.start()
-    logger.info("Bot started!")
-    await app.idle() # Keep the bot running until stopped
-
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user.")
-    except Exception as e:
-        logger.error(f"An unexpected error occurred: {e}")
-    finally:
-        if app.is_connected:
-            app.stop()
-        logger.info("Bot process finished.")
+    logger.info("Bot starting...")
+    # Start the daily download reset task in the background
+    asyncio.create_task(reset_daily_downloads_task())
+    app.run()
