@@ -25,8 +25,8 @@ API_ID = int(os.getenv("API_ID", 12345))
 API_HASH = os.getenv("API_HASH", "your_api_hash_here")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "your_bot_token_here")
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-FORCE_SUB_CHANNEL = -1002283182645  # Channel ID
-FORCE_SUB_GROUP = -1002085088955    # Group ID
+FORCE_SUB_CHANNEL = "@asbhai_bsr"  # Channel username
+FORCE_SUB_GROUP = "@aschat_group"  # Group username
 ADMIN_ID = 7315805581
 DAILY_FREE_LIMIT = 5
 PREMIUM_PRICES = {
@@ -69,12 +69,22 @@ def download_file(file_id, filename):
 async def is_user_subscribed(user_id):
     try:
         # Check channel subscription
-        channel_status = await app.get_chat_member(FORCE_SUB_CHANNEL, user_id)
+        try:
+            channel_status = await app.get_chat_member(FORCE_SUB_CHANNEL, user_id)
+            channel_joined = channel_status.status in ["member", "administrator", "creator"]
+        except Exception as e:
+            logger.error(f"Channel subscription check error: {e}")
+            channel_joined = False
+
         # Check group subscription
-        group_status = await app.get_chat_member(FORCE_SUB_GROUP, user_id)
-        
-        return (channel_status.status in ["member", "administrator", "creator"] and 
-                group_status.status in ["member", "administrator", "creator"])
+        try:
+            group_status = await app.get_chat_member(FORCE_SUB_GROUP, user_id)
+            group_joined = group_status.status in ["member", "administrator", "creator"]
+        except Exception as e:
+            logger.error(f"Group subscription check error: {e}")
+            group_joined = False
+
+        return channel_joined and group_joined
     except Exception as e:
         logger.error(f"Subscription check error: {e}")
         return False
@@ -98,7 +108,58 @@ async def get_user_data(user_id):
         logger.error(f"Error getting user data: {e}")
         return None
 
-# Modified start command with dual subscription check
+async def update_daily_counter(user_id):
+    try:
+        user_data = await get_user_data(user_id)
+        today = datetime.now().date()
+        last_download_date = user_data.get("last_download_date")
+        
+        if last_download_date and last_download_date.date() == today:
+            new_count = user_data["daily_downloads"] + 1
+        else:
+            new_count = 1
+        
+        users_col.update_one(
+            {"user_id": user_id},
+            {
+                "$set": {
+                    "daily_downloads": new_count,
+                    "last_download_date": datetime.now(),
+                    "total_downloads": user_data["total_downloads"] + 1
+                }
+            }
+        )
+        
+        downloads_col.insert_one({
+            "user_id": user_id,
+            "download_date": datetime.now(),
+            "count": new_count
+        })
+    except Exception as e:
+        logger.error(f"Error updating daily counter: {e}")
+
+async def can_user_download(user_id):
+    try:
+        user_data = await get_user_data(user_id)
+        if not user_data:
+            return False, "Error accessing your account data"
+        
+        if user_data["is_premium"] and user_data["premium_expiry"] > datetime.now():
+            return True, None
+        
+        today = datetime.now().date()
+        last_download_date = user_data.get("last_download_date")
+        
+        if last_download_date and last_download_date.date() == today:
+            if user_data["daily_downloads"] >= DAILY_FREE_LIMIT:
+                return False, f"⚠️ You've reached your daily free limit of {DAILY_FREE_LIMIT} downloads.\n\nPlease purchase premium to download more files."
+        
+        return True, None
+    except Exception as e:
+        logger.error(f"Error checking download permission: {e}")
+        return False, "An error occurred while checking your download permissions"
+
+# Bot handlers
 @app.on_message(filters.command("start"))
 async def start_command(client, message):
     try:
@@ -108,8 +169,8 @@ async def start_command(client, message):
         if not subscribed:
             buttons = [
                 [
-                    InlineKeyboardButton("📢 Join Channel", url="https://t.me/your_channel"),
-                    InlineKeyboardButton("👥 Join Group", url="https://t.me/your_group")
+                    InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_SUB_CHANNEL[1:]}"),
+                    InlineKeyboardButton("👥 Join Group", url=f"https://t.me/{FORCE_SUB_GROUP[1:]}")
                 ],
                 [InlineKeyboardButton("🔄 Check Subscription", callback_data="check_sub")]
             ]
@@ -143,7 +204,6 @@ async def start_command(client, message):
         logger.error(f"Error in start command: {e}")
         await message.reply_text("An error occurred. Please try again later.")
 
-# Modified link handler with dual subscription check
 @app.on_message(filters.regex(r'https?://[^\s]+'))
 async def handle_links(client, message):
     try:
@@ -154,8 +214,8 @@ async def handle_links(client, message):
         if not subscribed:
             buttons = [
                 [
-                    InlineKeyboardButton("📢 Join Channel", url="https://t.me/your_channel"),
-                    InlineKeyboardButton("👥 Join Group", url="https://t.me/your_group")
+                    InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_SUB_CHANNEL[1:]}"),
+                    InlineKeyboardButton("👥 Join Group", url=f"https://t.me/{FORCE_SUB_GROUP[1:]}")
                 ],
                 [InlineKeyboardButton("🔄 Check Subscription", callback_data="check_sub")]
             ]
@@ -169,14 +229,48 @@ async def handle_links(client, message):
             )
             return
         
-        # Rest of your link handling code remains the same...
-        # [Previous code for handling Terabox links...]
+        # Check if URL is Terabox
+        url = message.text
+        if "terabox" not in url.lower():
+            await message.reply_text("❌ Please send a valid Terabox link.")
+            return
         
+        # Check download limits
+        can_download, error_msg = await can_user_download(user_id)
+        if not can_download:
+            await message.reply_text(error_msg)
+            return
+        
+        # Extract file info
+        file_info = await extract_terabox_info(url)
+        if not file_info:
+            await message.reply_text("❌ Could not extract file information from the link.")
+            return
+        
+        # Create download button
+        download_url = f"https://{os.getenv('KOYEB_APP_NAME', 'your-app-name')}.koyeb.app/{uuid.uuid4().hex}/{file_info['title']}.mp4"
+        
+        response_msg = (
+            f"📁 **File Information**\n\n"
+            f"🔹 **Title:** {file_info['title']}\n"
+            f"🔹 **Size:** {file_info['size']}\n\n"
+            "Click below to download:"
+        )
+        
+        await message.reply_text(
+            response_msg,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬇️ Download", url=download_url)],
+                [InlineKeyboardButton("💎 Get Premium", callback_data="premium_info")]
+            ])
+        )
+        
+        # Update user download count
+        await update_daily_counter(user_id)
     except Exception as e:
         logger.error(f"Error handling link: {e}")
         await message.reply_text("An error occurred while processing your link. Please try again.")
 
-# Add this callback handler for subscription checks
 @app.on_callback_query(filters.regex("^check_sub$"))
 async def check_sub_callback(client, callback_query):
     try:
@@ -205,7 +299,7 @@ async def check_sub_callback(client, callback_query):
                 reply_markup=InlineKeyboardMarkup(buttons)
             )
         else:
-            await callback_query.answer("❌ You're not subscribed to both channel and group yet!", show_alert=True)
+            await callback_query.answer("❌ You haven't joined both channel and group yet!", show_alert=True)
     except Exception as e:
         logger.error(f"Error in check_sub callback: {e}")
         await callback_query.answer("An error occurred. Please try again.", show_alert=True)
