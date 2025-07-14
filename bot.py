@@ -5,7 +5,7 @@ import requests
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pymongo import MongoClient
-from datetime import datetime
+from datetime import datetime, timedelta # Added timedelta for expiration
 import uuid
 from bs4 import BeautifulSoup
 from flask import Flask, jsonify, send_file, abort
@@ -32,7 +32,8 @@ flask_app = Flask(__name__)
 PORT = int(os.getenv("PORT", 8080))
 
 # Thread pool for blocking operations like yt-dlp download
-executor = ThreadPoolExecutor(max_workers=5) # Adjust as needed
+# Using a higher max_workers for potentially more concurrent downloads
+executor = ThreadPoolExecutor(max_workers=10) # Adjusted max_workers
 
 # Bot configuration
 API_ID = int(os.getenv("API_ID", 12345))
@@ -48,6 +49,7 @@ DOWNLOAD_DIR = "downloads" # Directory to store downloaded files
 # !!! IMPORTANT !!!
 # Replace this with your actual Koyeb app URL (the base URL)
 # Example: https://your-app-name.koyeb.app/
+# Ensure it ends with a '/'
 DOWNLOAD_BASE_URL = os.getenv("DOWNLOAD_BASE_URL", "https://remarkable-nonna-arsadsaifi784-f815332b.koyeb.app/")
 if not DOWNLOAD_BASE_URL.endswith('/'):
     DOWNLOAD_BASE_URL += '/'
@@ -84,16 +86,24 @@ async def serve_file(file_id, filename):
 
     file_path = file_info.get("file_path")
     
+    # Check for expiration
+    if file_info.get("expires_at") and file_info["expires_at"] < datetime.now():
+        logger.warning(f"File expired: {file_id}. Deleting from DB and disk.")
+        files_col.delete_one({"_id": file_id})
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        abort(404, description="File link expired. Please request a new one from the bot.")
+
+
     if not file_path or not os.path.exists(file_path):
-        logger.warning(f"File not found on disk or path missing: {file_path}")
+        logger.warning(f"File not found on disk or path missing: {file_path}. Deleting from DB.")
         # Remove from DB if file is missing from disk
         files_col.delete_one({"_id": file_id}) 
         abort(404, description="File not found or expired. Please request again.")
 
     logger.info(f"Serving file: {file_path}")
     try:
-        # We use a non-blocking way to send file if possible, or use a separate thread
-        # Flask's send_file is usually blocking, but this setup allows other async ops
+        # Use a more explicit way for blocking send_file in an async context
         return await asyncio.to_thread(send_file, file_path, as_attachment=True, download_name=filename)
     except Exception as e:
         logger.error(f"Error serving file {file_path}: {e}")
@@ -106,81 +116,97 @@ def run_flask():
 threading.Thread(target=run_flask, daemon=True).start()
 
 
-# Terabox Downloader Function with multiple API fallbacks
-async def download_terabox_file_api(url):
+# --- Core Terabox Link Resolution Function ---
+# This function is crucial and needs working APIs.
+# It tries to get the direct video URL from a Terabox sharing link.
+async def resolve_terabox_link_to_direct_url(terabox_url):
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "application/json",
         }
         
-        # List of available APIs to try (in order of preference)
+        # IMPORTANT: Replace these with CURRENTLY WORKING Terabox direct link APIs.
+        # These are examples and might not work. You NEED to find active ones.
         apis = [
             {
-                "url": f"https://terabox-dl.qtcloud.workers.dev/api?url={url}",
+                "url": f"https://terabox-dl.qtcloud.workers.dev/api?url={terabox_url}",
                 "key": "download_url",
                 "name_key": "file_name",
                 "size_key": "file_size"
             },
             {
-                "url": f"https://terabox-downloader.sanskar.workers.dev/?url={url}",
+                "url": f"https://terabox-downloader.sanskar.workers.dev/?url={terabox_url}",
                 "key": "downloadLink",
                 "name_key": "fileName",
                 "size_key": "fileSize"
             },
-            {
-                "url": f"https://youtube4kdownloader.com/terabox-downloader/?url={url}",
-                "parser": "html",  # This one requires HTML parsing
-                "element": {"class": "download-btn"},
-                "attr": "href"
-            }
+            # Example of another potential API, you'd need to find if it returns JSON or HTML
+            # {
+            #     "url": f"https://your-new-terabox-api.com/api?link={terabox_url}",
+            #     "key": "direct_url",
+            #     "name_key": "title",
+            #     "size_key": "size"
+            # },
+            # For HTML parsing APIs, you need to inspect their structure
+            # {
+            #     "url": f"https://youtube4kdownloader.com/terabox-downloader/?url={terabox_url}",
+            #     "parser": "html",
+            #     "element": {"class": "download-btn"},
+            #     "attr": "href"
+            # }
         ]
         
         for api in apis:
             try:
-                # Use requests directly, not inside asyncio.to_thread unless it's blocking
-                response = requests.get(api["url"], headers=headers, timeout=30)
+                logger.info(f"Trying API: {api['url']}")
+                response = await asyncio.to_thread(requests.get, api["url"], headers=headers, timeout=30)
+                
                 if api.get("parser") == "html":
                     soup = BeautifulSoup(response.content, "html.parser")
                     download_btn = soup.find("a", api["element"])
                     if download_btn and download_btn.get(api["attr"]):
+                        logger.info(f"HTML API success: {api['url']}")
                         return {
                             "success": True,
-                            "download_url": download_btn.get(api["attr"]),
-                            "file_name": "terabox_file",
+                            "direct_url": download_btn.get(api["attr"]),
+                            "file_name": "terabox_file", # HTML parsers rarely give accurate names/sizes directly
                             "file_size": "N/A"
                         }
                 else:
                     if response.status_code == 200:
                         data = response.json()
-                        if data.get(api["key"]):
+                        # Check for various common keys for the direct URL
+                        direct_url = data.get(api["key"]) or data.get("url") or data.get("direct_link") or data.get("link")
+                        if direct_url:
+                            logger.info(f"JSON API success: {api['url']}")
                             return {
                                 "success": True,
-                                "download_url": data[api["key"]],
-                                "file_name": data.get(api.get("name_key", "file_name"), "terabox_file"),
-                                "file_size": data.get(api.get("size_key", "file_size"), "N/A")
+                                "direct_url": direct_url,
+                                "file_name": data.get(api.get("name_key"), "terabox_file"),
+                                "file_size": data.get(api.get("size_key"), "N/A")
                             }
             except Exception as api_error:
                 logger.warning(f"API {api['url']} failed: {api_error}")
-                continue
+                continue # Try the next API
         
-        return {"success": False, "error": "All API download methods failed. Please try again later."}
+        return {"success": False, "error": "All configured APIs failed to resolve the Terabox link. Please try again later or provide working APIs."}
     except Exception as e:
-        logger.error(f"Terabox API download error: {e}")
+        logger.error(f"Error in resolving Terabox link: {e}")
         return {"success": False, "error": str(e)}
 
-# Function to extract info and download using yt-dlp (now saves to disk)
-async def get_info_and_download_ytdlp(url, message_to_edit):
+# Function to download the resolved direct URL using yt-dlp and store it locally
+async def download_file_and_get_info_ytdlp(direct_url, message_to_edit):
     file_id = str(uuid.uuid4())
-    filepath = os.path.join(DOWNLOAD_DIR, file_id + "_%(title)s.%(ext)s")
+    # %(title)s will be replaced by yt-dlp
+    filepath_template = os.path.join(DOWNLOAD_DIR, file_id + "_%(title)s.%(ext)s") 
     
-    # Store message_to_edit and url for progress hook to access
-    message_to_edit.current_url = url 
+    # Store message_to_edit for progress hook to access
     message_to_edit.file_id = file_id # Store file_id in message object
     
     ydl_opts = {
         'format': 'best',
-        'outtmpl': filepath,
+        'outtmpl': filepath_template,
         'merge_output_format': 'mp4',
         'noplaylist': True,
         'verbose': False, # Keep verbose False for production
@@ -190,19 +216,29 @@ async def get_info_and_download_ytdlp(url, message_to_edit):
     }
 
     loop = asyncio.get_running_loop()
+    final_filepath = None
     try:
         # Run the blocking yt_dlp operation in a separate thread
-        info = await loop.run_in_executor(executor, lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(url, download=True))
+        info = await loop.run_in_executor(executor, lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(direct_url, download=True))
         
-        final_filepath = None
-        if 'entries' in info: # for playlists or multiple videos, take the first
+        # Determine the final downloaded file path
+        if 'entries' in info: 
             final_filepath = yt_dlp.YoutubeDL(ydl_opts).prepare_filename(info['entries'][0])
         else:
             final_filepath = yt_dlp.YoutubeDL(ydl_opts).prepare_filename(info)
         
         # Ensure correct extension after merge
         if ydl_opts['merge_output_format'] and not final_filepath.endswith(ydl_opts['merge_output_format']):
-            final_filepath = f"{os.path.splitext(final_filepath)[0]}.{ydl_opts['merge_output_format']}"
+            # This handles cases where yt-dlp might download as .webm and then merge to .mp4
+            final_filepath_check = f"{os.path.splitext(final_filepath)[0]}.{ydl_opts['merge_output_format']}"
+            if os.path.exists(final_filepath_check):
+                final_filepath = final_filepath_check
+            else:
+                # Fallback in case merge_output_format didn't apply or changed name slightly
+                possible_files = [f for f in os.listdir(DOWNLOAD_DIR) if f.startswith(file_id)]
+                if possible_files:
+                    final_filepath = os.path.join(DOWNLOAD_DIR, possible_files[0])
+
 
         if not os.path.exists(final_filepath):
             raise FileNotFoundError(f"Downloaded file not found at {final_filepath}")
@@ -215,7 +251,7 @@ async def get_info_and_download_ytdlp(url, message_to_edit):
         thumbnail_url = None
         if 'thumbnails' in info and info['thumbnails']:
             # Find the largest thumbnail
-            thumbnail_url = max(info['thumbnails'], key=lambda x: x.get('width', 0) * x.get('height', 0)).get('url')
+            thumbnail_url = max(info['thumbnails'], key=lambda x: x.get('width', 0) * x.get('height', 0) if x.get('width') and x.get('height') else 0).get('url')
         elif info.get('thumbnail'):
             thumbnail_url = info['thumbnail']
 
@@ -223,11 +259,11 @@ async def get_info_and_download_ytdlp(url, message_to_edit):
         files_col.insert_one({
             "_id": file_id,
             "file_path": final_filepath,
-            "original_url": url,
+            "original_direct_url": direct_url,
             "file_name": info.get('title', 'terabox_video'),
             "file_size": file_size_hr,
             "created_at": datetime.now(),
-            "expires_at": datetime.now() + timedelta(hours=2) # Link expires after 2 hours (adjust as needed)
+            "expires_at": datetime.now() + timedelta(hours=6) # Link expires after 6 hours (adjusted)
         })
 
         return {
@@ -239,9 +275,9 @@ async def get_info_and_download_ytdlp(url, message_to_edit):
             "original_filename_for_download": os.path.basename(final_filepath).split('_', 1)[-1] # Remove UUID prefix
         }
     except Exception as e:
-        logger.error(f"yt-dlp info/download error: {e}")
-        if os.path.exists(filepath): # If a partial file was created
-            os.remove(filepath)
+        logger.error(f"yt-dlp download and info extraction error: {e}")
+        if final_filepath and os.path.exists(final_filepath): # Clean up if partial file was created
+            os.remove(final_filepath)
         return {"success": False, "error": str(e)}
 
 # Progress hook for yt-dlp
@@ -257,8 +293,7 @@ async def progress_hook(d, message_to_edit):
             status_text = f"⏳ Downloading: {human_readable_size(downloaded_bytes)}..."
         
         try:
-            # Edit the message only if there's a significant change to avoid flood waits
-            # Or if it's the first update
+            # Edit the message only if there's a significant change or after a few seconds
             if not hasattr(message_to_edit, 'last_update_time') or \
                (datetime.now() - message_to_edit.last_update_time).total_seconds() > 5: # Update every 5 seconds
                 await message_to_edit.edit_text(status_text)
@@ -333,8 +368,8 @@ async def handle_terabox_link(client, message):
         # Offer two download options
         buttons = [
             [
-                InlineKeyboardButton("⬇️ Fast Download (API)", callback_data=f"download_api_{user_id}"),
-                InlineKeyboardButton("⬇️ Stable Download (Library)", callback_data=f"download_ytdlp_{user_id}")
+                InlineKeyboardButton("⬇️ Fast Download (API Link)", callback_data=f"download_api_{user_id}"),
+                InlineKeyboardButton("⬇️ Stable Download (Koyeb Link)", callback_data=f"download_koyeb_{user_id}")
             ],
             [
                 InlineKeyboardButton("📢 Updates", url=f"https://t.me/{UPDATE_CHANNEL}"),
@@ -354,10 +389,10 @@ async def handle_terabox_link(client, message):
 # Temporary storage for URLs (for callback query, should be robust for production)
 temp_storage = {}
 
-@app.on_callback_query(filters.regex(r"^(download_api_|download_ytdlp_)(\d+)$"))
+@app.on_callback_query(filters.regex(r"^(download_api_|download_koyeb_)(\d+)$")) # Changed regex for koyeb_
 async def handle_download_choice(client, callback_query):
     user_id = callback_query.from_user.id
-    choice_type = callback_query.data.split('_')[1] # 'api' or 'ytdlp'
+    choice_type = callback_query.data.split('_')[1] # 'api' or 'koyeb'
     original_user_id = int(callback_query.data.split('_')[2]) # User who initiated the download
 
     if user_id != original_user_id:
@@ -372,7 +407,6 @@ async def handle_download_choice(client, callback_query):
     await callback_query.answer("Processing your request...")
     processing_msg = await callback_query.message.edit_text("⏳ Processing your Terabox link...")
 
-    download_info = None
     try:
         # Check daily limit again (important for preventing abuse)
         user_data = users_col.find_one({"user_id": user_id})
@@ -389,65 +423,65 @@ async def handle_download_choice(client, callback_query):
             await callback_query.message.reply_text(f"❌ You've reached your daily limit of {DAILY_FREE_LIMIT} downloads.")
             return
 
-        if choice_type == "api":
-            await processing_msg.edit_text("⏳ Using Fast Download (API method)...")
-            download_info = await download_terabox_file_api(url)
-            
-            if download_info and download_info.get("success"):
-                users_col.update_one(
-                    {"user_id": user_id},
-                    {"$inc": {"download_count": 1}, "$set": {"last_download": datetime.now()}},
-                    upsert=True
-                )
-                file_name = download_info.get("file_name", "file")
-                download_url = download_info["download_url"]
-                
-                await processing_msg.delete()
-                await callback_query.message.reply_text(
-                    f"✅ Download Ready (API Method)!\n\n"
-                    f"📁 File: {file_name}\n"
-                    f"📦 Size: {download_info.get('file_size', 'N/A')}\n\n"
-                    f"⚠️ Note: Free download links may expire quickly",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("⬇️ Download Now", url=download_url)],
-                        [
-                            InlineKeyboardButton("📢 Updates", url=f"https://t.me/{UPDATE_CHANNEL}"),
-                            InlineKeyboardButton("👥 Support", url=f"https://t.me/{SUPPORT_GROUP}")
-                        ]
-                    ])
-                )
-            else:
-                await processing_msg.delete()
-                await callback_query.message.reply_text(f"❌ Error: {download_info.get('error', 'Failed to process link with selected method.')}")
+        # --- Resolve Terabox link to Direct URL first for both methods ---
+        await processing_msg.edit_text("⏳ Resolving Terabox link to direct video URL...")
+        resolved_info = await resolve_terabox_link_to_direct_url(url)
+        
+        if not resolved_info["success"]:
+            await processing_msg.delete()
+            await callback_query.message.reply_text(f"❌ Failed to get direct video URL: {resolved_info['error']}")
+            return
 
-        elif choice_type == "ytdlp":
-            await processing_msg.edit_text("⏳ Using Stable Download (Library method)... This might take longer...")
-            download_info = await get_info_and_download_ytdlp(url, processing_msg) # Now it downloads the file and stores info
+        direct_video_url = resolved_info["direct_url"]
+        
+        # Increment download count only upon successful direct URL resolution
+        users_col.update_one(
+            {"user_id": user_id},
+            {"$inc": {"download_count": 1}, "$set": {"last_download": datetime.now()}},
+            upsert=True
+        )
+
+        # --- Handle choice based on resolved direct URL ---
+        if choice_type == "api":
+            await processing_msg.delete()
+            await callback_query.message.reply_text(
+                f"✅ Direct Download Link (API Method)!\n\n"
+                f"📁 File: {resolved_info.get('file_name', 'terabox_file')}\n"
+                f"📦 Size: {resolved_info.get('file_size', 'N/A')}\n\n"
+                f"⚠️ Note: This link is provided by an external API and may expire quickly.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⬇️ Download Now", url=direct_video_url)],
+                    [
+                        InlineKeyboardButton("📢 Updates", url=f"https://t.me/{UPDATE_CHANNEL}"),
+                        InlineKeyboardButton("👥 Support", url=f"https://t.me/{SUPPORT_GROUP}")
+                    ]
+                ])
+            )
+
+        elif choice_type == "koyeb":
+            await processing_msg.edit_text("⏳ Downloading file to server (Library method)... This might take longer...")
+            # Now download the resolved direct URL using yt-dlp and store it on Koyeb server
+            download_result = await download_file_and_get_info_ytdlp(direct_video_url, processing_msg)
             
-            if download_info and download_info.get("success"):
-                users_col.update_one(
-                    {"user_id": user_id},
-                    {"$inc": {"download_count": 1}, "$set": {"last_download": datetime.now()}},
-                    upsert=True
-                )
-                file_id = download_info["file_id"]
-                file_name = download_info["file_name"]
-                file_size = download_info["file_size"]
-                thumbnail_url = download_info["thumbnail_url"]
-                original_filename = download_info["original_filename_for_download"]
+            if download_result and download_result.get("success"):
+                file_id = download_result["file_id"]
+                file_name = download_result["file_name"]
+                file_size = download_result["file_size"]
+                thumbnail_url = download_result["thumbnail_url"]
+                original_filename = download_result["original_filename_for_download"]
 
                 # Construct the direct download link using your Koyeb base URL
-                direct_download_link = f"{DOWNLOAD_BASE_URL}download/{file_id}/{original_filename}"
+                direct_download_link_koyeb = f"{DOWNLOAD_BASE_URL}download/{file_id}/{original_filename}"
 
                 caption_text = (
-                    f"✅ Download Ready (Library Method)!\n\n"
+                    f"✅ Download Ready (Koyeb Hosted)!\n\n"
                     f"📁 **Title**: {file_name}\n"
                     f"📦 **Size**: {file_size}\n\n"
                     f"⚠️ Note: Download link will expire after some time."
                 )
                 
                 buttons = [
-                    [InlineKeyboardButton("⬇️ Download Now", url=direct_download_link)],
+                    [InlineKeyboardButton("⬇️ Download Now", url=direct_download_link_koyeb)],
                     [
                         InlineKeyboardButton("📢 Updates", url=f"https://t.me/{UPDATE_CHANNEL}"),
                         InlineKeyboardButton("👥 Support", url=f"https://t.me/{SUPPORT_GROUP}")
@@ -477,17 +511,18 @@ async def handle_download_choice(client, callback_query):
                         reply_markup=InlineKeyboardMarkup(buttons)
                     )
                 await processing_msg.delete()
-                await callback_query.message.reply_text("✨ Your download link is ready!")
+                await callback_query.message.reply_text("✨ Your Koyeb hosted download link is ready!")
 
             else:
+                # Error in yt-dlp download or info extraction for Koyeb method
                 await processing_msg.delete()
-                await callback_query.message.reply_text(f"❌ Error: {download_info.get('error', 'Failed to process link with selected method.')}")
+                await callback_query.message.reply_text(f"❌ Error during Koyeb hosted download: {download_result.get('error', 'Failed to download to server.')}")
 
     except Exception as e:
         logger.error(f"Error in handle_download_choice: {e}")
         if processing_msg:
             await processing_msg.delete()
-        await callback_query.message.reply_text("❌ An error occurred during download. Please try again later.")
+        await callback_query.message.reply_text("❌ An unexpected error occurred. Please try again later.")
 
 
 @app.on_callback_query(filters.regex("^help_download$"))
@@ -498,8 +533,9 @@ async def help_download(client, callback_query):
         "2. Find the video you want to download\n"
         "3. Click 'Share' and copy the link\n"
         "4. Paste that link here in the bot\n"
-        "5. Choose your preferred download method (Fast API or Stable Library)\n"
-        "6. Wait for processing and either get a direct download link or the file directly!\n\n"
+        "5. Choose your preferred download method:\n"
+        "   - **Fast Download (API Link)**: Gets a direct link from an external API (may expire quickly).\n"
+        "   - **Stable Download (Koyeb Link)**: Downloads the file to our server and provides a stable link (file will be removed after some time).\n\n"
         "For any issues, contact @aschat_group"
     )
     await callback_query.answer()
@@ -509,3 +545,4 @@ if __name__ == "__main__":
     logger.info("Starting Free Terabox Downloader Bot...")
     logger.info(f"Flask health check server running on port {PORT}")
     app.run()
+
