@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 import requests
 from urllib.parse import urlparse, parse_qs
 import uuid
+from flask import Flask, request, jsonify, redirect
 
 # Configure logging
 logging.basicConfig(
@@ -16,12 +17,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Initialize Flask app
+flask_app = Flask(__name__)
+
 # Bot configuration
 API_ID = int(os.getenv("API_ID", 12345))  # Default value for testing
 API_HASH = os.getenv("API_HASH", "your_api_hash_here")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "your_bot_token_here")
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")  # You'll set this in Koyeb
-FORCE_SUB_CHANNEL = "@asbhaibser"
+FORCE_SUB_CHANNEL = "@asbhaibsr"
 ADMIN_ID = 7315805581  # Change to your admin ID
 DAILY_FREE_LIMIT = 5
 PREMIUM_PRICES = {
@@ -50,6 +54,17 @@ app = Client(
     api_hash=API_HASH,
     bot_token=BOT_TOKEN
 )
+
+# Flask routes
+@flask_app.route('/')
+def home():
+    return "Terabox Downloader Bot is running!"
+
+@flask_app.route('/<file_id>/<filename>')
+def download_file(file_id, filename):
+    # Here you would implement your actual file download logic
+    # For now, we'll just redirect to a placeholder
+    return redirect("https://example.com/your-terabox-download-url")
 
 # Helper functions
 async def extract_terabox_info(url):
@@ -216,7 +231,7 @@ async def handle_links(client, message):
             return
         
         # Create download button
-        download_url = f"https://depressed-cornelle-asbhaibsr-179ba27d.koyeb.app/{uuid.uuid4().hex}/{file_info['title']}.mp4"
+        download_url = f"https://{os.getenv('KOYEB_APP_NAME', 'your-app-name')}.koyeb.app/{uuid.uuid4().hex}/{file_info['title']}.mp4"
         
         response_msg = (
             f"📁 **File Information**\n\n"
@@ -239,9 +254,15 @@ async def handle_links(client, message):
         logger.error(f"Error handling link: {e}")
         await message.reply_text("An error occurred while processing your link. Please try again.")
 
-# [Rest of your callback handlers remain the same...]
+def run_flask():
+    flask_app.run(host='0.0.0.0', port=8000)
 
-# Start the bot
 if __name__ == "__main__":
+    import threading
+    # Start Flask server in a separate thread
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+    
     logger.info("Starting Terabox Downloader Bot...")
     app.run()
