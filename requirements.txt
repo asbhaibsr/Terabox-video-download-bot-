@@ -1,5 +1,5 @@
 pyrogram==2.0.106
-pymongo==4.3.3
+pymongo==4.6.2  # Updated (4.3.3 is outdated)
 requests==2.31.0
 python-dotenv==1.0.0
 dnspython==2.4.2
@@ -7,8 +7,8 @@ beautifulsoup4==4.12.2
 tgcrypto==1.2.5
 flask==2.3.2
 bs4==0.0.1
-yt-dlp
-aiohttp==3.9.5  # Added for asynchronous requests
-aiodns==3.2.0    # Added for aiodns dependency
-Pillow==10.3.0   # Added for image processing (PIL)
-humanreadable==2.1.2 # Added for human_readable_size function
+yt-dlp==2024.6.22  # Pinned (latest stable)
+aiohttp==3.9.5
+aiodns==3.2.0
+Pillow==10.3.0  # If error persists, try Pillow>=10.0.0
+humanreadable==2.1.2
