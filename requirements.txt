@@ -8,3 +8,7 @@ tgcrypto==1.2.5
 flask==2.3.2
 bs4==0.0.1
 yt-dlp
+aiohttp==3.9.5  # Added for asynchronous requests
+aiodns==3.2.0    # Added for aiodns dependency
+Pillow==10.3.0   # Added for image processing (PIL)
+humanreadable==2.1.2 # Added for human_readable_size function
