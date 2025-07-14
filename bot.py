@@ -25,8 +25,8 @@ API_ID = int(os.getenv("API_ID", 12345))
 API_HASH = os.getenv("API_HASH", "your_api_hash_here")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "your_bot_token_here")
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-FORCE_SUB_CHANNEL = "@asbhai_bsr"  # Channel username
-FORCE_SUB_GROUP = "@aschat_group"  # Group username
+FORCE_SUB_CHANNEL = "asbhai_bsr"  # Without @ symbol
+FORCE_SUB_GROUP = "aschat_group"  # Without @ symbol
 ADMIN_ID = 7315805581
 DAILY_FREE_LIMIT = 5
 PREMIUM_PRICES = {
@@ -65,21 +65,23 @@ def home():
 def download_file(file_id, filename):
     return redirect("https://example.com/your-terabox-download-url")
 
-# Helper functions
+# Improved subscription check function
 async def is_user_subscribed(user_id):
     try:
         # Check channel subscription
         try:
-            channel_status = await app.get_chat_member(FORCE_SUB_CHANNEL, user_id)
-            channel_joined = channel_status.status in ["member", "administrator", "creator"]
+            channel_member = await app.get_chat_member(FORCE_SUB_CHANNEL, user_id)
+            channel_joined = channel_member.status in ["member", "administrator", "creator"]
+            logger.info(f"Channel member status for {user_id}: {channel_member.status}")
         except Exception as e:
             logger.error(f"Channel subscription check error: {e}")
             channel_joined = False
 
         # Check group subscription
         try:
-            group_status = await app.get_chat_member(FORCE_SUB_GROUP, user_id)
-            group_joined = group_status.status in ["member", "administrator", "creator"]
+            group_member = await app.get_chat_member(FORCE_SUB_GROUP, user_id)
+            group_joined = group_member.status in ["member", "administrator", "creator"]
+            logger.info(f"Group member status for {user_id}: {group_member.status}")
         except Exception as e:
             logger.error(f"Group subscription check error: {e}")
             group_joined = False
@@ -169,8 +171,8 @@ async def start_command(client, message):
         if not subscribed:
             buttons = [
                 [
-                    InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_SUB_CHANNEL[1:]}"),
-                    InlineKeyboardButton("👥 Join Group", url=f"https://t.me/{FORCE_SUB_GROUP[1:]}")
+                    InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_SUB_CHANNEL}"),
+                    InlineKeyboardButton("👥 Join Group", url=f"https://t.me/{FORCE_SUB_GROUP}")
                 ],
                 [InlineKeyboardButton("🔄 Check Subscription", callback_data="check_sub")]
             ]
@@ -199,7 +201,6 @@ async def start_command(client, message):
         await message.reply_text(
             welcome_msg,
             reply_markup=InlineKeyboardMarkup(buttons)
-        )
     except Exception as e:
         logger.error(f"Error in start command: {e}")
         await message.reply_text("An error occurred. Please try again later.")
@@ -214,8 +215,8 @@ async def handle_links(client, message):
         if not subscribed:
             buttons = [
                 [
-                    InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_SUB_CHANNEL[1:]}"),
-                    InlineKeyboardButton("👥 Join Group", url=f"https://t.me/{FORCE_SUB_GROUP[1:]}")
+                    InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_SUB_CHANNEL}"),
+                    InlineKeyboardButton("👥 Join Group", url=f"https://t.me/{FORCE_SUB_GROUP}")
                 ],
                 [InlineKeyboardButton("🔄 Check Subscription", callback_data="check_sub")]
             ]
@@ -241,11 +242,11 @@ async def handle_links(client, message):
             await message.reply_text(error_msg)
             return
         
-        # Extract file info
-        file_info = await extract_terabox_info(url)
-        if not file_info:
-            await message.reply_text("❌ Could not extract file information from the link.")
-            return
+        # Extract file info (placeholder - implement your actual extraction logic)
+        file_info = {
+            "title": "Example File",
+            "size": "100 MB"
+        }
         
         # Create download button
         download_url = f"https://{os.getenv('KOYEB_APP_NAME', 'your-app-name')}.koyeb.app/{uuid.uuid4().hex}/{file_info['title']}.mp4"
