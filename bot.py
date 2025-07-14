@@ -1,689 +1,941 @@
 import os
-import re
 import logging
-import requests
-from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pymongo import MongoClient
 from datetime import datetime, timedelta
-import uuid
-from bs4 import BeautifulSoup
-from flask import Flask, jsonify, send_file, abort
-import threading
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from flask import Flask, request, abort
+from threading import Thread
+import asyncio  # asyncio is still needed for run_polling and other async ops
+from pymongo import MongoClient
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+    CallbackContext
+)
+import requests
+from telegram.error import TelegramError
+from bson.objectid import ObjectId
 
-# Important: These libraries were provided by the user.
-# Ensure all are installed: pip install pyrogram pymongo beautifulsoup4 flask requests yt-dlp telethon cryptg pyaes aiohttp aiodns pillow hachoir redis FastTelethonhelper humanreadable
-import telethon # User provided
-import cryptg # User provided
-import pyaes # User provided
-import aiohttp # User provided
-import aiodns # User provided
-# aiohttp[speedups] is a dependency, not a direct import
-from PIL import Image # User provided, from pillow
-import hachoir # User provided
-# requests is already used
-# redis is a client library, usually imported as `redis`
-# FastTelethonhelper - assuming this is a custom helper, no direct import needed unless used
-import humanreadable # User provided
+# Initialize Flask app for health check
+app = Flask(__name__)
 
-# Import yt_dlp
-try:
-    import yt_dlp
-except ImportError:
-    logging.error("yt_dlp is not installed. Please install it using 'pip install yt-dlp'")
-    exit(1)
-
-# Configure logging
+# Enable logging
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Initialize Flask app for health checks
-flask_app = Flask(__name__)
-PORT = int(os.getenv("PORT", 8080))
+# Configuration
+TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+if not TOKEN:
+    raise ValueError("TELEGRAM_BOT_TOKEN environment variable not set!")
 
-# Thread pool for blocking operations like yt-dlp download
-executor = ThreadPoolExecutor(max_workers=10)
+MONGO_URI = os.getenv('MONGODB_URI', 'mongodb://localhost:27017')
+client = MongoClient(MONGO_URI)
+db = client.get_database('earnbot')
+users = db.users
+user_states = db.user_states
+withdrawal_requests = db.withdrawal_requests
 
-# Bot configuration
-API_ID = int(os.getenv("API_ID", 12345))
-API_HASH = os.getenv("API_HASH", "your_api_hash_here")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "your_bot_token_here")
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-SUPPORT_GROUP = "aschat_group"
-UPDATE_CHANNEL = "asbhai_bsr"
-ADMIN_ID = 7315805581
-DAILY_FREE_LIMIT = 5
-DOWNLOAD_DIR = "downloads" # Directory to store downloaded files
+# --- Admin ID ---
+ADMIN_ID = 7315805581  # Replace with your actual Telegram User ID
+# --- Admin ID ---
 
-# !!! IMPORTANT !!!
-# Replace this with your actual Koyeb app URL (the base URL)
-# Example: https://your-app-name.koyeb.app/
-# Ensure it ends with a '/'
-DOWNLOAD_BASE_URL = os.getenv("DOWNLOAD_BASE_URL", "https://remarkable-nonna-arsadsaifi784-f815332b.koyeb.app/")
-if not DOWNLOAD_BASE_URL.endswith('/'):
-    DOWNLOAD_BASE_URL += '/'
+# Bot constants
+MIN_WITHDRAWAL = 70
+EARN_PER_LINK = 0.15
+REFERRAL_BONUS = 0.50
+LINK_COOLDOWN = 1  # minutes
 
-# Create download directory if it doesn't exist
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+# Shortlink API configuration
+API_TOKEN = '4ca8f20ebd8b02f6fe1f55eb1e49136f69e2f5a0'  # Replace with your SmallShorts API Token
+SHORTS_API_BASE_URL = "https://dashboard.smallshorts.com/api"
 
-# Initialize MongoDB
-try:
-    mongo_client = MongoClient(MONGO_URI)
-    db = mongo_client["terabox_bot"]
-    users_col = db["users"]
-    files_col = db["downloadable_files"] # Collection to store info about downloadable files
-    logger.info("Connected to MongoDB")
-except Exception as e:
-    logger.error(f"MongoDB connection error: {e}")
-    raise
+# Webhook configuration (REMOVE THESE FOR POLLING)
+# WEBHOOK_PATH = f"/telegram-webhook/{TOKEN}"
+# WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 
-# Initialize Pyrogram client
-app = Client("terabox_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# Database setup functions
+def init_user_state_db():
+    """Initializes the user_states collection."""
+    user_states.create_index("user_id", unique=True)
 
-# Flask Routes for Health Check and File Serving
-@flask_app.route('/')
-def health_check():
-    return jsonify({"status": "ok", "message": "Terabox Downloader Bot is running"})
+def init_withdrawal_requests_db():
+    """Initializes the withdrawal_requests collection."""
+    withdrawal_requests.create_index("user_id")
+    withdrawal_requests.create_index("status")
+    withdrawal_requests.create_index("timestamp")
 
-@flask_app.route('/download/<file_id>/<filename>')
-async def serve_file(file_id, filename):
-    file_info = files_col.find_one({"_id": file_id})
-    
-    if not file_info:
-        logger.warning(f"File ID not found in DB: {file_id}")
-        abort(404, description="File not found or expired.")
+def init_db():
+    """Initializes all necessary database collections and indexes."""
+    users.create_index("user_id", unique=True)
+    users.create_index("referral_code", unique=True, sparse=True)
+    init_user_state_db()
+    init_withdrawal_requests_db()
+init_db()
 
-    file_path = file_info.get("file_path")
-    
-    # Check for expiration
-    if file_info.get("expires_at") and file_info["expires_at"] < datetime.now():
-        logger.warning(f"File expired: {file_id}. Deleting from DB and disk.")
-        files_col.delete_one({"_id": file_id})
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        abort(404, description="File link expired. Please request a new one from the bot.")
-
-
-    if not file_path or not os.path.exists(file_path):
-        logger.warning(f"File not found on disk or path missing: {file_path}. Deleting from DB.")
-        files_col.delete_one({"_id": file_id}) 
-        abort(404, description="File not found or expired. Please request again.")
-
-    logger.info(f"Serving file: {file_path}")
-    try:
-        return await asyncio.to_thread(send_file, file_path, as_attachment=True, download_name=filename)
-    except Exception as e:
-        logger.error(f"Error serving file {file_path}: {e}")
-        abort(500, description="Error serving file.")
-
-def run_flask():
-    flask_app.run(host='0.0.0.0', port=PORT)
-
-# Start Flask server in a separate thread
-threading.Thread(target=run_flask, daemon=True).start()
-
-
-# --- Core Terabox Link Resolution Function ---
-# This function is crucial and needs working APIs.
-# It tries to get the direct video URL from a Terabox sharing link.
-async def resolve_terabox_link_to_direct_url(terabox_url):
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "application/json",
+# Helper functions
+def get_user(user_id):
+    user = users.find_one({"user_id": user_id})
+    if not user:
+        user = {
+            "user_id": user_id,
+            "balance": 0.0,
+            "referral_code": f"ref_{user_id}",
+            "referrals": 0,
+            "referral_earnings": 0.0,
+            "total_earned": 0.0,
+            "withdrawn": 0.0,
+            "last_click": None,
+            "created_at": datetime.utcnow(),
+            "referred_by": None
         }
-        
-        # IMPORTANT: Replace these with CURRENTLY WORKING Terabox direct link APIs.
-        # These are examples and might not work. You NEED to find active ones.
-        # Always prioritize official/community-maintained APIs if possible.
-        # Example API URLs - You MUST VERIFY and UPDATE these!
-        apis = [
-            # Example 1: Known public Terabox DL worker. Often works, but can be rate-limited or go down.
-            {
-                "url": f"https://terabox-dl.qtcloud.workers.dev/api?url={terabox_url}",
-                "key": "download_url",
-                "name_key": "file_name",
-                "size_key": "file_size"
-            },
-            # Example 2: Another worker URL. Check if it's active.
-            {
-                "url": f"https://terabox-downloader.sanskar.workers.dev/?url={terabox_url}",
-                "key": "downloadLink",
-                "name_key": "fileName",
-                "size_key": "fileSize"
-            },
-            # Example 3: You might find others on GitHub or forums.
-            # {
-            #     "url": f"https://api.example.com/terabox?link={terabox_url}",
-            #     "key": "url", # Or 'direct_link', 'video_url', etc.
-            #     "name_key": "title",
-            #     "size_key": "size"
-            # },
-            # Example 4: HTML parsing API (less common for direct links, but possible)
-            # {
-            #     "url": f"https://some-html-parser.com/terabox/?url={terabox_url}",
-            #     "parser": "html",
-            #     "element": {"id": "download_button"}, # Find the correct element selector
-            #     "attr": "href" # Attribute containing the URL
-            # }
-        ]
-        
-        for api in apis:
-            try:
-                logger.info(f"Trying API: {api.get('url', 'N/A').split('?')[0]}...")
-                # Use aiohttp for asynchronous requests
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(api["url"], headers=headers, timeout=30) as response:
-                        if api.get("parser") == "html":
-                            html_content = await response.text()
-                            soup = BeautifulSoup(html_content, "html.parser")
-                            download_btn = soup.find("a", api["element"])
-                            if download_btn and download_btn.get(api["attr"]):
-                                logger.info(f"HTML API success: {api['url']}")
-                                return {
-                                    "success": True,
-                                    "direct_url": download_btn.get(api["attr"]),
-                                    "file_name": "terabox_file",
-                                    "file_size": "N/A"
-                                }
-                        else:
-                            if response.status == 200:
-                                data = await response.json()
-                                direct_url = data.get(api["key"]) or data.get("url") or data.get("direct_link") or data.get("link")
-                                if direct_url:
-                                    logger.info(f"JSON API success: {api['url']}")
-                                    return {
-                                        "success": True,
-                                        "direct_url": direct_url,
-                                        "file_name": data.get(api.get("name_key"), "terabox_file"),
-                                        "file_size": data.get(api.get("size_key"), "N/A")
-                                    }
-            except Exception as api_error:
-                logger.warning(f"API {api.get('url', 'N/A').split('?')[0]} failed: {api_error}")
-                continue # Try the next API
-        
-        return {"success": False, "error": "All configured APIs failed to resolve the Terabox link. Please try again later or provide working APIs."}
-    except Exception as e:
-        logger.error(f"Error in resolving Terabox link: {e}")
-        return {"success": False, "error": str(e)}
+        users.insert_one(user)
+    return user
 
-# Function to download the resolved direct URL using yt-dlp and store it locally
-async def download_file_and_get_info_ytdlp(source_url, message_to_edit):
-    file_id = str(uuid.uuid4())
-    filepath_template = os.path.join(DOWNLOAD_DIR, file_id + "_%(title)s.%(ext)s") 
-    
-    message_to_edit.file_id = file_id # Store file_id in message object
-    
-    ydl_opts = {
-        'format': 'best',
-        'outtmpl': filepath_template,
-        'merge_output_format': 'mp4',
-        'noplaylist': True,
-        'verbose': False,
-        'quiet': True,
-        'no_warnings': True,
-        'progress_hooks': [lambda d: asyncio.create_task(progress_hook(d, message_to_edit))]
-    }
+def update_user(user_id, update_data):
+    users.update_one({"user_id": user_id}, {"$set": update_data})
 
-    loop = asyncio.get_running_loop()
-    final_filepath = None
+def get_user_state(user_id):
+    state = user_states.find_one({"user_id": user_id})
+    return state.get("state") if state else None
+
+def set_user_state(user_id, state_name):
+    user_states.update_one({"user_id": user_id}, {"$set": {"state": state_name}}, upsert=True)
+
+def clear_user_state(user_id):
+    user_states.delete_one({"user_id": user_id})
+
+def generate_short_link(long_url):
     try:
-        info = await loop.run_in_executor(executor, lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(source_url, download=True))
-        
-        if 'entries' in info: 
-            final_filepath = yt_dlp.YoutubeDL(ydl_opts).prepare_filename(info['entries'][0])
+        params = {
+            'api': API_TOKEN,
+            'url': long_url
+        }
+        response = requests.get(SHORTS_API_BASE_URL, params=params)
+        response.raise_for_status()
+        result = response.json()
+
+        if result.get('status') == 'error':
+            logger.error(f"SmallShorts API Error: {result.get('message')}")
+            return None
+        elif result.get('shortenedUrl'):
+            return result['shortenedUrl']
         else:
-            final_filepath = yt_dlp.YoutubeDL(ydl_opts).prepare_filename(info)
-        
-        if ydl_opts['merge_output_format'] and not final_filepath.endswith(ydl_opts['merge_output_format']):
-            final_filepath_check = f"{os.path.splitext(final_filepath)[0]}.{ydl_opts['merge_output_format']}"
-            if os.path.exists(final_filepath_check):
-                final_filepath = final_filepath_check
+            logger.error(f"Unexpected SmallShorts API response: {result}")
+            return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error connecting to SmallShorts API: {e}")
+        return None
+    except ValueError as e:
+        logger.error(f"Error parsing SmallShorts API response (not JSON): {e}")
+        return None
+
+# Bot handlers
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = get_user(user_id)
+    bot_username = (await context.bot.get_me()).username
+
+    clear_user_state(user_id)
+
+    if context.args:
+        arg = context.args[0]
+        if arg.startswith('ref_'):
+            referrer_id = int(arg.split('_')[1])
+            referrer = get_user(referrer_id)
+            if referrer and referrer['user_id'] != user_id and user['referred_by'] is None:
+                users.update_one(
+                    {"user_id": referrer_id},
+                    {"$inc": {
+                        "referrals": 1,
+                        "referral_earnings": REFERRAL_BONUS,
+                        "balance": REFERRAL_BONUS,
+                        "total_earned": REFERRAL_BONUS
+                    }}
+                )
+                users.update_one({"user_id": user_id}, {"$set": {"referred_by": referrer_id}})
+                await update.message.reply_text(
+                    f"🎉 Welcome! You were referred by {referrer_id}! A bonus of ₹{REFERRAL_BONUS:.2f} has been added to their account."
+                )
+            elif referrer and referrer['user_id'] == user_id:
+                await update.message.reply_text("You cannot refer yourself.")
+            elif user['referred_by'] is not None:
+                await update.message.reply_text("You have already been referred.")
             else:
-                possible_files = [f for f in os.listdir(DOWNLOAD_DIR) if f.startswith(file_id)]
-                if possible_files:
-                    final_filepath = os.path.join(DOWNLOAD_DIR, possible_files[0])
+                await update.message.reply_text("Invalid referrer.")
 
+        elif arg.startswith('solve_'):
+            solved_user_id = int(arg.split('_')[1])
+            if solved_user_id == user_id:
+                if user['last_click'] and (datetime.utcnow() - user['last_click']) < timedelta(minutes=LINK_COOLDOWN):
+                    remaining = (user['last_click'] + timedelta(minutes=LINK_COOLDOWN)) - datetime.utcnow()
+                    remaining_seconds = int(remaining.total_seconds())
+                    await update.message.reply_text(
+                        f"⏳ You've recently completed a link. Please wait {remaining_seconds} seconds before earning again."
+                    )
+                else:
+                    new_balance = user['balance'] + EARN_PER_LINK
+                    users.update_one(
+                        {"user_id": user_id},
+                        {"$set": {
+                            "balance": new_balance,
+                            "total_earned": user['total_earned'] + EARN_PER_LINK,
+                            "last_click": datetime.utcnow()
+                        }}
+                    )
+                    await update.message.reply_text(
+                        f"✅ Link solved successfully!\n"
+                        f"💰 You earned ₹{EARN_PER_LINK:.2f}. Your new balance: ₹{new_balance:.2f}"
+                    )
+            else:
+                await update.message.reply_text("This link was not generated for you.")
 
-        if not os.path.exists(final_filepath):
-            raise FileNotFoundError(f"Downloaded file not found at {final_filepath}")
-
-        file_size_bytes = os.path.getsize(final_filepath)
-        file_size_hr = human_readable_size(file_size_bytes)
-        
-        thumbnail_url = None
-        if 'thumbnails' in info and info['thumbnails']:
-            thumbnail_url = max(info['thumbnails'], key=lambda x: x.get('width', 0) * x.get('height', 0) if x.get('width') and x.get('height') else 0).get('url')
-        elif info.get('thumbnail'):
-            thumbnail_url = info['thumbnail']
-
-        files_col.insert_one({
-            "_id": file_id,
-            "file_path": final_filepath,
-            "original_source_url": source_url, # Changed from original_direct_url
-            "file_name": info.get('title', 'video_file'),
-            "file_size": file_size_hr,
-            "created_at": datetime.now(),
-            "expires_at": datetime.now() + timedelta(hours=6)
-        })
-
-        return {
-            "success": True,
-            "file_id": file_id,
-            "file_name": info.get('title', 'video_file'),
-            "file_size": file_size_hr,
-            "thumbnail_url": thumbnail_url,
-            "original_filename_for_download": os.path.basename(final_filepath).split('_', 1)[-1]
-        }
-    except Exception as e:
-        logger.error(f"yt-dlp download and info extraction error for {source_url}: {e}")
-        if final_filepath and os.path.exists(final_filepath):
-            os.remove(final_filepath)
-        return {"success": False, "error": str(e)}
-
-# Progress hook for yt-dlp
-async def progress_hook(d, message_to_edit):
-    if d['status'] == 'downloading':
-        total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate')
-        downloaded_bytes = d.get('downloaded_bytes', 0)
-        
-        if total_bytes:
-            percentage = (downloaded_bytes / total_bytes) * 100
-            status_text = f"⏳ Downloading: {percentage:.2f}% ({human_readable_size(downloaded_bytes)} / {human_readable_size(total_bytes)})"
-        else:
-            status_text = f"⏳ Downloading: {human_readable_size(downloaded_bytes)}..."
-        
-        try:
-            if not hasattr(message_to_edit, 'last_update_time') or \
-               (datetime.now() - message_to_edit.last_update_time).total_seconds() > 5:
-                await message_to_edit.edit_text(status_text)
-                message_to_edit.last_update_time = datetime.now()
-        except Exception:
-            pass
-
-    elif d['status'] == 'finished':
-        try:
-            await message_to_edit.edit_text("✅ Download finished! Generating download link...")
-        except Exception:
-            pass
-    elif d['status'] == 'error':
-        try:
-            await message_to_edit.edit_text("❌ Download failed.")
-        except Exception:
-            pass
-
-def human_readable_size(size_bytes):
-    if size_bytes is None:
-        return "N/A"
-    size_bytes = float(size_bytes)
-    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-        if size_bytes < 1024.0:
-            return f"{size_bytes:.2f} {unit}"
-        size_bytes /= 1024.0
-
-@app.on_message(filters.command("start"))
-async def start(client, message):
-    buttons = [
-        [
-            InlineKeyboardButton("📢 Updates Channel", url=f"https://t.me/{UPDATE_CHANNEL}"),
-            InlineKeyboardButton("👥 Support Group", url=f"https://t.me/{SUPPORT_GROUP}")
-        ],
-        [InlineKeyboardButton("❓ How to Download", callback_data="help_download")]
+    keyboard = [
+        [InlineKeyboardButton("💰 Generate Link", callback_data='generate_link')],
+        [InlineKeyboardButton("📊 My Wallet", callback_data='wallet')],
+        [InlineKeyboardButton("👥 Refer Friends", callback_data='referral')]
     ]
-    
-    await message.reply_text(
-        "👋 Welcome to Terabox Downloader Bot!\n\n"
-        "🔗 Send me any Terabox link, or use /download_other to download videos from YouTube, etc.\n\n"
-        "⚠️ Note: This is free service, download speed may be slow",
-        reply_markup=InlineKeyboardMarkup(buttons)
+
+    await update.message.reply_text(
+        "🎉 Welcome to Earn Bot!\n"
+        "Solve links and earn ₹0.15 per link!\n"
+        "Minimum withdrawal: ₹70",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-@app.on_message(filters.regex(r'https?://[^\s]+') & filters.incoming)
-async def handle_any_link(client, message):
-    url = message.text
-    if "terabox" in url.lower() or "teraboxapp" in url.lower():
-        # Handle Terabox links
-        try:
-            user_id = message.from_user.id
-            
-            # Check daily limit
-            user_data = users_col.find_one({"user_id": user_id})
-            today = datetime.now().date()
-            
-            if user_data and user_data.get("last_download"):
-                last_download_date = user_data["last_download"].date()
-                if last_download_date < today:
-                    users_col.update_one({"user_id": user_id}, {"$set": {"download_count": 0}})
-                    user_data["download_count"] = 0
-            
-            if user_data and user_data.get("download_count", 0) >= DAILY_FREE_LIMIT:
-                await message.reply_text(f"❌ You've reached your daily limit of {DAILY_FREE_LIMIT} downloads. Please try again tomorrow or upgrade for unlimited downloads.")
-                return
-            
-            temp_storage[user_id] = url 
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-            buttons = [
-                [
-                    InlineKeyboardButton("⬇️ Fast Download (API Link)", callback_data=f"download_terabox_api_{user_id}"),
-                    InlineKeyboardButton("⬇️ Stable Download (Koyeb Link)", callback_data=f"download_terabox_koyeb_{user_id}")
-                ],
-                [
-                    InlineKeyboardButton("📢 Updates", url=f"https://t.me/{UPDATE_CHANNEL}"),
-                    InlineKeyboardButton("👥 Support", url=f"https://t.me/{SUPPORT_GROUP}")
-                ]
-            ]
-            
-            await message.reply_text(
-                "Choose your Terabox download method:",
-                reply_markup=InlineKeyboardMarkup(buttons)
+    user_id = query.from_user.id
+    user = get_user(user_id)
+    bot_username = (await context.bot.get_me()).username
+
+    # Ensure state is cleared for non-admin interactions unless specifically handled
+    if user_id != ADMIN_ID:
+        clear_user_state(user_id)  # This might clear state prematurely if user clicks a button during a stateful process
+
+    if query.data == 'generate_link':
+        if user['last_click'] and (datetime.utcnow() - user['last_click']) < timedelta(minutes=LINK_COOLDOWN):
+            remaining = (user['last_click'] + timedelta(minutes=LINK_COOLDOWN)) - datetime.utcnow()
+            remaining_seconds = int(remaining.total_seconds())
+            await query.edit_message_text(f"⏳ Please wait {remaining_seconds} seconds before generating another link.")
+            return
+
+        destination_link = f"https://t.me/{bot_username}?start=solve_{user_id}"
+        short_link = generate_short_link(destination_link)
+
+        if not short_link:
+            await query.edit_message_text(
+                "❌ Link generate करने में समस्या हुई। कृपया बाद में पुनः प्रयास करें।"
             )
-            
-        except Exception as e:
-            logger.error(f"Error handling Terabox link: {e}")
-            await message.reply_text("❌ An error occurred. Please try again later.")
-    else:
-        # If it's not a Terabox link, offer to download it using yt-dlp (Other Videos)
-        await message.reply_text(
-            "This doesn't seem like a Terabox link. Do you want to download it using our 'Other Video Download' feature (YouTube, etc.)?",
+            return
+
+        keyboard_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔗 Click to Solve Link", url=short_link)],
+            [InlineKeyboardButton("❓ How to Solve Link", url="https://t.me/Asbhai_bsr/289")],
+            [InlineKeyboardButton("🔙 Back", callback_data='back_to_main')]
+        ])
+
+        await query.edit_message_text(
+            f"✅ Your link is ready! Please click the button below to solve it.\n\n"
+            f"Once you complete the steps on the website, you'll be redirected back to me, and your balance will be updated automatically.\n"
+            f"⏳ Next link available in {LINK_COOLDOWN} minute(s) after successful completion.",
+            reply_markup=keyboard_markup
+        )
+
+    elif query.data == 'wallet':
+        await query.edit_message_text(
+            f"💰 Your Wallet\n\n"
+            f"🪙 Balance: ₹{user['balance']:.2f}\n"
+            f"📊 Total Earned: ₹{user['total_earned']:.2f}\n"
+            f"💸 Withdrawn: ₹{user['withdrawn']:.2f}\n"
+            f"👥 Referrals: {user['referrals']} (₹{user['referral_earnings']:.2f})\n\n"
+            f"💵 Minimum withdrawal: ₹{MIN_WITHDRAWAL}",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Yes, Download This", callback_data=f"download_other_confirm_{message.from_user.id}_{url}")],
-                [InlineKeyboardButton("❌ No, Ignore", callback_data="ignore_link")]
+                [InlineKeyboardButton("💵 Withdraw", callback_data='withdraw')],
+                [InlineKeyboardButton("🔙 Back", callback_data='back_to_main')]
             ])
         )
 
-@app.on_message(filters.command("download_other") & filters.text)
-async def command_download_other(client, message):
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await message.reply_text("Please provide a video link after the command. \nExample: `/download_other https://youtube.com/watch?v=your_video`")
-        return
-    
-    url = args[1]
-    user_id = message.from_user.id
-
-    # Check daily limit
-    user_data = users_col.find_one({"user_id": user_id})
-    today = datetime.now().date()
-    
-    if user_data and user_data.get("last_download"):
-        last_download_date = user_data["last_download"].date()
-        if last_download_date < today:
-            users_col.update_one({"user_id": user_id}, {"$set": {"download_count": 0}})
-            user_data["download_count"] = 0
-    
-    if user_data and user_data.get("download_count", 0) >= DAILY_FREE_LIMIT:
-        await message.reply_text(f"❌ You've reached your daily limit of {DAILY_FREE_LIMIT} downloads. Please try again tomorrow or upgrade for unlimited downloads.")
-        return
-
-    # Call the download handler for other videos
-    await handle_other_video_download(client, message, url, user_id)
-
-
-# Temporary storage for URLs (for callback query, should be robust for production)
-temp_storage = {}
-
-@app.on_callback_query(filters.regex(r"^(download_terabox_api_|download_terabox_koyeb_)(\d+)$"))
-async def handle_terabox_download_choice(client, callback_query):
-    user_id = callback_query.from_user.id
-    choice_parts = callback_query.data.split('_')
-    choice_type = choice_parts[2] # 'api' or 'koyeb'
-    original_user_id = int(choice_parts[3])
-
-    if user_id != original_user_id:
-        await callback_query.answer("This button is not for you!", show_alert=True)
-        return
-
-    url = temp_storage.pop(user_id, None)
-    if not url:
-        await callback_query.answer("Error: Link not found. Please send the link again.", show_alert=True)
-        return
-
-    await callback_query.answer("Processing your request...")
-    processing_msg = await callback_query.message.edit_text("⏳ Processing your Terabox link...")
-
-    try:
-        user_data = users_col.find_one({"user_id": user_id})
-        today = datetime.now().date()
-        
-        if user_data and user_data.get("last_download"):
-            last_download_date = user_data["last_download"].date()
-            if last_download_date < today:
-                users_col.update_one({"user_id": user_id}, {"$set": {"download_count": 0}})
-                user_data["download_count"] = 0
-        
-        if user_data and user_data.get("download_count", 0) >= DAILY_FREE_LIMIT:
-            await processing_msg.delete()
-            await callback_query.message.reply_text(f"❌ You've reached your daily limit of {DAILY_FREE_LIMIT} downloads.")
-            return
-
-        # --- Resolve Terabox link to Direct URL first for both methods ---
-        await processing_msg.edit_text("⏳ Resolving Terabox link to direct video URL...")
-        resolved_info = await resolve_terabox_link_to_direct_url(url)
-        
-        if not resolved_info["success"]:
-            await processing_msg.delete()
-            await callback_query.message.reply_text(f"❌ Failed to get direct video URL: {resolved_info['error']}")
-            return
-
-        direct_video_url = resolved_info["direct_url"]
-        
-        users_col.update_one(
-            {"user_id": user_id},
-            {"$inc": {"download_count": 1}, "$set": {"last_download": datetime.now()}},
-            upsert=True
+    elif query.data == 'referral':
+        await query.edit_message_text(
+            f"👥 Referral Program\n\n"
+            f"🔗 Your referral link:\n"
+            f"https://t.me/{bot_username}?start={user['referral_code']}\n\n"
+            f"💰 Earn ₹{REFERRAL_BONUS} for each friend who joins using your link!\n"
+            f"👥 Total referrals: {user['referrals']}\n"
+            f"💸 Earned from referrals: ₹{user['referral_earnings']:.2f}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='back_to_main')]])
         )
 
-        if choice_type == "api":
-            await processing_msg.delete()
-            await callback_query.message.reply_text(
-                f"✅ Direct Download Link (API Method)!\n\n"
-                f"📁 File: {resolved_info.get('file_name', 'terabox_file')}\n"
-                f"📦 Size: {resolved_info.get('file_size', 'N/A')}\n\n"
-                f"⚠️ Note: This link is provided by an external API and may expire quickly.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("⬇️ Download Now", url=direct_video_url)],
-                    [
-                        InlineKeyboardButton("📢 Updates", url=f"https://t.me/{UPDATE_CHANNEL}"),
-                        InlineKeyboardButton("👥 Support", url=f"https://t.me/{SUPPORT_GROUP}")
-                    ]
-                ])
+    elif query.data == 'back_to_main':
+        keyboard = [
+            [InlineKeyboardButton("💰 Generate Link", callback_data='generate_link')],
+            [InlineKeyboardButton("📊 My Wallet", callback_data='wallet')],
+            [InlineKeyboardButton("👥 Refer Friends", callback_data='referral')]
+        ]
+        await query.edit_message_text(
+            "🎉 Welcome to Earn Bot!\n"
+            "Solve links and earn ₹0.15 per link!\n"
+            "Minimum withdrawal: ₹70",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif query.data == 'withdraw':
+        if user['balance'] >= MIN_WITHDRAWAL:
+            # Offer withdrawal options
+            keyboard = [
+                [InlineKeyboardButton("💳 UPI ID", callback_data='withdraw_upi')],
+                [InlineKeyboardButton("🏦 Bank Account", callback_data='withdraw_bank')],
+                [InlineKeyboardButton("🤳 QR Code (Screenshot)", callback_data='withdraw_qr')],
+                [InlineKeyboardButton("↩️ Cancel", callback_data='back_to_main')]
+            ]
+            await query.edit_message_text(
+                f"✅ Your balance is ₹{user['balance']:.2f}. Please select your preferred withdrawal method:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        else:
+            await query.edit_message_text(
+                f"❌ Your balance (₹{user['balance']:.2f}) is below the minimum withdrawal amount of ₹{MIN_WITHDRAWAL:.2f}.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='back_to_main')]])
             )
 
-        elif choice_type == "koyeb":
-            await processing_msg.edit_text("⏳ Downloading file to server (Koyeb Hosted)... This might take longer...")
-            download_result = await download_file_and_get_info_ytdlp(direct_video_url, processing_msg)
-            
-            if download_result and download_result.get("success"):
-                file_id = download_result["file_id"]
-                file_name = download_result["file_name"]
-                file_size = download_result["file_size"]
-                thumbnail_url = download_result["thumbnail_url"]
-                original_filename = download_result["original_filename_for_download"]
+    # New withdrawal method callbacks
+    elif query.data == 'withdraw_upi':
+        set_user_state(user_id, 'WITHDRAW_ENTER_UPI')
+        await query.edit_message_text(
+            "Please send your **UPI ID** (e.g., `yourname@bank` or `phonenumber@upi`).",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Cancel", callback_data='back_to_main')]])
+        )
+    elif query.data == 'withdraw_bank':
+        set_user_state(user_id, 'WITHDRAW_ENTER_BANK')
+        await query.edit_message_text(
+            "Please send your **Bank Account Details** in the following format:\n\n"
+            "```\n"
+            "Account Holder Name: [Your Name]\n"
+            "Account Number: [Your Account Number]\n"
+            "IFSC Code: [Your IFSC Code]\n"
+            "Bank Name: [Your Bank Name]\n"
+            "```\n"
+            "Example:\n"
+            "```\n"
+            "Account Holder Name: John Doe\n"
+            "Account Number: 123456789012\n"
+            "IFSC Code: SBIN0000001\n"
+            "Bank Name: State Bank of India\n"
+            "```",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Cancel", callback_data='back_to_main')]])
+        )
+    elif query.data == 'withdraw_qr':
+        set_user_state(user_id, 'WITHDRAW_UPLOAD_QR')
+        await query.edit_message_text(
+            "Please upload your **UPI QR Code screenshot**. Make sure the QR code is clear and visible.",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Cancel", callback_data='back_to_main')]])
+        )
 
-                direct_download_link_koyeb = f"{DOWNLOAD_BASE_URL}download/{file_id}/{original_filename}"
+    # --- Admin Callbacks ---
+    elif query.data == 'admin_get_balance':
+        if user_id == ADMIN_ID:
+            set_user_state(user_id, 'GET_BALANCE_USER_ID')
+            await query.edit_message_text("Please send the User ID of the user whose balance you want to check.")
+    elif query.data == 'admin_add_balance':
+        if user_id == ADMIN_ID:
+            set_user_state(user_id, 'ADD_BALANCE_USER_ID')
+            await query.edit_message_text("Please send the User ID of the user to whom you want to add balance.")
+    elif query.data == 'admin_main_menu':
+        if user_id == ADMIN_ID:
+            await admin_menu(update, context)
+    elif query.data == 'admin_show_pending_withdrawals':
+        if user_id == ADMIN_ID:
+            await admin_show_withdrawals(update, context)
+    elif query.data.startswith('approve_payment_'):
+        if user_id == ADMIN_ID:
+            request_id = query.data.split('_')[2]
+            await admin_approve_payment(update, context, request_id)
 
-                caption_text = (
-                    f"✅ Download Ready (Koyeb Hosted)!\n\n"
-                    f"📁 **Title**: {file_name}\n"
-                    f"📦 **Size**: {file_size}\n\n"
-                    f"⚠️ Note: Download link will expire after some time."
-                )
-                
-                buttons = [
-                    [InlineKeyboardButton("⬇️ Download Now", url=direct_download_link_koyeb)],
-                    [
-                        InlineKeyboardButton("📢 Updates", url=f"https://t.me/{UPDATE_CHANNEL}"),
-                        InlineKeyboardButton("👥 Support", url=f"https://t.me/{SUPPORT_GROUP}")
-                    ]
-                ]
 
-                if thumbnail_url:
-                    try:
-                        await client.send_photo(
-                            chat_id=user_id,
-                            photo=thumbnail_url,
-                            caption=caption_text,
-                            reply_markup=InlineKeyboardMarkup(buttons)
-                        )
-                    except Exception as photo_error:
-                        logger.warning(f"Failed to send photo thumbnail: {photo_error}. Sending text message instead.")
-                        await client.send_message(
-                            chat_id=user_id,
-                            text=caption_text,
-                            reply_markup=InlineKeyboardMarkup(buttons)
-                        )
-                else:
-                    await client.send_message(
-                        chat_id=user_id,
-                        text=caption_text,
-                        reply_markup=InlineKeyboardMarkup(buttons)
-                    )
-                await processing_msg.delete()
-                await callback_query.message.reply_text("✨ Your Koyeb hosted download link is ready!")
-
-            else:
-                await processing_msg.delete()
-                await callback_query.message.reply_text(f"❌ Error during Koyeb hosted download: {download_result.get('error', 'Failed to download to server.')}")
-
-    except Exception as e:
-        logger.error(f"Error in handle_terabox_download_choice: {e}")
-        if processing_msg:
-            await processing_msg.delete()
-        await callback_query.message.reply_text("❌ An unexpected error occurred. Please try again later.")
-
-# Handler for 'other_video_download' confirmation from inline button
-@app.on_callback_query(filters.regex(r"^download_other_confirm_(\d+)_(.*)$"))
-async def handle_other_video_confirm(client, callback_query):
-    user_id = callback_query.from_user.id
-    original_user_id = int(callback_query.data.split('_')[3])
-    url = callback_query.data.split('_', 4)[4] # Re-extract the URL from callback_data
-
-    if user_id != original_user_id:
-        await callback_query.answer("This button is not for you!", show_alert=True)
+# --- Admin Handlers ---
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("🚫 You are not authorized to use this command.")
         return
-    
-    await callback_query.answer("Starting other video download...")
-    await callback_query.message.delete() # Delete the confirmation message
 
-    # Now proceed with the actual download
-    await handle_other_video_download(client, callback_query.message, url, user_id)
+    clear_user_state(user_id)
+    await admin_menu(update, context)
 
+async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("📊 Get User Balance", callback_data='admin_get_balance')],
+        [InlineKeyboardButton("➕ Add Balance to User", callback_data='admin_add_balance')],
+        [InlineKeyboardButton("💸 Pending Withdrawals", callback_data='admin_show_pending_withdrawals')],
+        [InlineKeyboardButton("↩️ Back to Main Menu", callback_data='back_to_main')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-@app.on_callback_query(filters.regex("^ignore_link$"))
-async def ignore_link(client, callback_query):
-    await callback_query.answer("Link ignored.")
-    await callback_query.message.delete()
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            "⚙️ Admin Panel Options:",
+            reply_markup=reply_markup
+        )
+    else:
+        await update.message.reply_text(
+            "⚙️ Admin Panel Options:",
+            reply_markup=reply_markup
+        )
 
+async def admin_show_withdrawals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pending_requests = list(withdrawal_requests.find({"status": "pending"}))
 
-async def handle_other_video_download(client, message, url, user_id):
-    processing_msg = await message.reply_text("⏳ Processing your video link (YouTube, etc.)...")
+    if not pending_requests:
+        await update.callback_query.edit_message_text(
+            "✅ No pending withdrawal requests at the moment.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Admin Menu", callback_data='admin_main_menu')]])
+        )
+        return
+
+    for req in pending_requests:
+        user_obj = get_user(req['user_id'])
+        username = user_obj.get('username', f"User_{req['user_id']}")
+
+        details_str = ""
+        if req['withdrawal_details']['method'] == "UPI ID":
+            details_str = f"UPI ID: `{req['withdrawal_details']['id']}`"
+        elif req['withdrawal_details']['method'] == "Bank Account":
+            details_str = f"Bank Details:\n```\n{req['withdrawal_details']['details']}\n```"
+        elif req['withdrawal_details']['method'] == "QR Code":
+            details_str = f"QR Code File ID: `{req['withdrawal_details']['file_id']}`"
+            try:
+                await context.bot.send_photo(
+                    chat_id=ADMIN_ID,
+                    photo=req['withdrawal_details']['file_id'],
+                    caption=f"QR for User `{req['user_id']}` (Amount: ₹{req['amount']:.2f})"
+                )
+            except Exception as e:
+                logger.error(f"Failed to resend QR photo to admin for request {req['_id']}: {e}")
+                details_str += "\n_ (Could not resend QR photo) _"
+
+        message_text = (
+            f"💸 **Pending Withdrawal Request** 💸\n"
+            f"User: [{username}](tg://user?id={req['user_id']})\n"
+            f"User ID: `{req['user_id']}`\n"
+            f"Amount: ₹{req['amount']:.2f}\n"
+            f"Method: {req['withdrawal_details']['method']}\n"
+            f"{details_str}\n"
+            f"Requested On: {req['timestamp'].strftime('%Y-%m-%d %H:%M:%S UTC')}"
+        )
+
+        keyboard = [[InlineKeyboardButton("✅ Mark as Paid", callback_data=f"approve_payment_{req['_id']}")]]
+
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=message_text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+
+    await update.callback_query.edit_message_text(
+        "👆 Above are all pending withdrawal requests. Click 'Mark as Paid' to process them.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Admin Menu", callback_data='admin_main_menu')]])
+    )
+
+async def admin_approve_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, request_id: str):
+    query = update.callback_query
+    await query.answer("Processing payment approval...")
 
     try:
-        user_data = users_col.find_one({"user_id": user_id})
-        today = datetime.now().date()
-        
-        if user_data and user_data.get("last_download"):
-            last_download_date = user_data["last_download"].date()
-            if last_download_date < today:
-                users_col.update_one({"user_id": user_id}, {"$set": {"download_count": 0}})
-                user_data["download_count"] = 0
-        
-        if user_data and user_data.get("download_count", 0) >= DAILY_FREE_LIMIT:
-            await processing_msg.delete()
-            await message.reply_text(f"❌ You've reached your daily limit of {DAILY_FREE_LIMIT} downloads. Please try again tomorrow or upgrade for unlimited downloads.")
-            return
+        request = withdrawal_requests.find_one_and_update(
+            {"_id": ObjectId(request_id), "status": "pending"},
+            {"$set": {"status": "completed", "completed_at": datetime.utcnow()}},
+            return_document=True
+        )
 
-        # Use yt-dlp to download directly as it supports many platforms
-        download_result = await download_file_and_get_info_ytdlp(url, processing_msg)
+        if request:
+            user_id = request['user_id']
+            amount = request['amount']
+            withdrawal_method = request['withdrawal_details']['method']
 
-        if download_result and download_result.get("success"):
-            users_col.update_one(
+            # --- RESET USER'S EARNING DATA AFTER SUCCESSFUL PAYMENT ---
+            users.update_one(
                 {"user_id": user_id},
-                {"$inc": {"download_count": 1}, "$set": {"last_download": datetime.now()}},
-                upsert=True
+                {"$set": {
+                    "balance": 0.0,
+                    "referrals": 0,
+                    "referral_earnings": 0.0,
+                    "last_click": None,
+                    "referred_by": None
+                },
+                    "$inc": {
+                        "withdrawn": amount
+                    }
+                }
             )
-            file_id = download_result["file_id"]
-            file_name = download_result["file_name"]
-            file_size = download_result["file_size"]
-            thumbnail_url = download_result["thumbnail_url"]
-            original_filename = download_result["original_filename_for_download"]
+            logger.info(f"User {user_id}'s earning data reset after successful withdrawal.")
 
-            direct_download_link_koyeb = f"{DOWNLOAD_BASE_URL}download/{file_id}/{original_filename}"
-
-            caption_text = (
-                f"✅ Download Ready (Koyeb Hosted)!\n\n"
-                f"📁 **Title**: {file_name}\n"
-                f"📦 **Size**: {file_size}\n\n"
-                f"⚠️ Note: Download link will expire after some time."
-            )
-            
-            buttons = [
-                [InlineKeyboardButton("⬇️ Download Now", url=direct_download_link_koyeb)],
-                [
-                    InlineKeyboardButton("📢 Updates", url=f"https://t.me/{UPDATE_CHANNEL}"),
-                    InlineKeyboardButton("👥 Support", url=f"https://t.me/{SUPPORT_GROUP}")
-                ]
-            ]
-
-            if thumbnail_url:
-                try:
-                    await client.send_photo(
-                        chat_id=user_id,
-                        photo=thumbnail_url,
-                        caption=caption_text,
-                        reply_markup=InlineKeyboardMarkup(buttons)
-                    )
-                except Exception as photo_error:
-                    logger.warning(f"Failed to send photo thumbnail for other video: {photo_error}. Sending text message instead.")
-                    await client.send_message(
-                        chat_id=user_id,
-                        text=caption_text,
-                        reply_markup=InlineKeyboardMarkup(buttons)
-                    )
-            else:
-                await client.send_message(
+            # Notify the user
+            try:
+                await context.bot.send_message(
                     chat_id=user_id,
-                    text=caption_text,
-                    reply_markup=InlineKeyboardMarkup(buttons)
+                    text=f"🎉 **Payment Successful!** 🎉\n\n"
+                         f"Your withdrawal request of ₹{amount:.2f} via {withdrawal_method} has been successfully processed.\n"
+                         f"Your earning balance has been reset to start fresh. Thank you for using Earn Bot!",
+                    parse_mode='Markdown'
                 )
-            await processing_msg.delete()
-            await message.reply_text("✨ Your Koyeb hosted download link for this video is ready!")
+                await query.edit_message_text(
+                    f"✅ Payment for User `{user_id}` (Request ID: `{request_id}`) marked as Paid and user notified.\n"
+                    f"User's earning data has been reset.",
+                    parse_mode='Markdown',
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Pending List", callback_data='admin_show_pending_withdrawals')]])
+                )
+            except TelegramError as e:
+                logger.error(f"Failed to notify user {user_id} about successful payment: {e}")
+                await query.edit_message_text(
+                    f"✅ Payment for User `{user_id}` (Request ID: `{request_id}`) marked as Paid, but failed to notify user.\n"
+                    f"User's earning data has been reset.",
+                    parse_mode='Markdown',
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Pending List", callback_data='admin_show_pending_withdrawals')]])
+                )
 
         else:
-            await processing_msg.delete()
-            await message.reply_text(f"❌ Error downloading this video: {download_result.get('error', 'Failed to download from the provided URL.')}\n\nPlease ensure the URL is valid and the video is publicly accessible.")
+            await query.edit_message_text(
+                "❌ This withdrawal request was already processed or could not be found.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Pending List", callback_data='admin_show_pending_withdrawals')]])
+            )
 
     except Exception as e:
-        logger.error(f"Error handling other video download: {e}")
-        if processing_msg:
-            await processing_msg.delete()
-        await message.reply_text("❌ An unexpected error occurred while processing this video. Please try again later.")
+        logger.error(f"Error processing payment approval for request {request_id}: {e}")
+        await query.edit_message_text(
+            f"❌ An error occurred while approving this payment: {e}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Pending List", callback_data='admin_show_pending_withdrawals')]])
+        )
 
 
-@app.on_callback_query(filters.regex("^help_download$"))
-async def help_download(client, callback_query):
-    help_text = (
-        "📹 How to Download Videos:\n\n"
-        "1. **For Terabox Links:**\n"
-        "   - Open Terabox app or website, copy the link.\n"
-        "   - Paste the link here in the bot.\n"
-        "   - Choose: 'Fast Download (API Link)' (direct link from external API) or 'Stable Download (Koyeb Link)' (downloads to our server).\n\n"
-        "2. **For Other Videos (YouTube, etc.):**\n"
-        "   - Send the link directly (if it's not Terabox, bot will ask to download).\n"
-        "   - OR Use the command: `/download_other <video_link>` (e.g., `/download_other https://youtube.com/watch?v=xyz`)\n\n"
-        "⚠️ Note: All download links will expire after some time.\n\n"
-        "For any issues, contact @aschat_group"
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("🚫 You are not authorized to use this command.")
+        return
+    set_user_state(user_id, 'BROADCAST_MESSAGE')
+    await update.message.reply_text(
+        "📝 Please send the message you want to broadcast to all users.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Cancel Broadcast", callback_data='admin_main_menu')]])
     )
-    await callback_query.answer()
-    await callback_query.message.reply_text(help_text)
 
-if __name__ == "__main__":
-    logger.info("Starting Free Terabox & Other Video Downloader Bot...")
-    logger.info(f"Flask health check server running on port {PORT}")
-    app.run()
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("🚫 You are not authorized to use this command.")
+        return
 
+    total_users = users.count_documents({})
+
+    await update.message.reply_text(
+        f"📊 Bot Statistics:\n"
+        f"Total Users: {total_users}\n"
+    )
+
+async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        return
+
+    current_state = get_user_state(user_id)
+    text_input = update.message.text
+
+    if current_state == 'GET_BALANCE_USER_ID':
+        try:
+            target_user_id = int(text_input)
+            target_user = users.find_one({"user_id": target_user_id})
+            if target_user:
+                await update.message.reply_text(
+                    f"User ID: `{target_user_id}`\n"
+                    f"Balance: ₹{target_user['balance']:.2f}\n"
+                    f"Total Earned: ₹{target_user['total_earned']:.2f}\n"
+                    f"Referrals: {target_user['referrals']}\n"
+                    f"Referred By: {target_user['referred_by'] if target_user.get('referred_by') else 'N/A'}",
+                    parse_mode='Markdown',
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Admin Menu", callback_data='admin_main_menu')]])
+                )
+            else:
+                await update.message.reply_text(
+                    "User not found.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Admin Menu", callback_data='admin_main_menu')]])
+                )
+        except ValueError:
+            await update.message.reply_text(
+                "Invalid User ID. Please send a numeric User ID.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Admin Menu", callback_data='admin_main_menu')]])
+            )
+        finally:
+            clear_user_state(user_id)
+
+    elif current_state == 'ADD_BALANCE_USER_ID':
+        try:
+            target_user_id = int(text_input)
+            context.user_data['target_user_id_for_add'] = target_user_id
+            set_user_state(user_id, 'ADD_BALANCE_AMOUNT')
+            await update.message.reply_text(f"User ID: `{target_user_id}`. Now, please send the amount to add.", parse_mode='Markdown')
+        except ValueError:
+            await update.message.reply_text(
+                "Invalid User ID. Please send a numeric User ID.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Admin Menu", callback_data='admin_main_menu')]])
+            )
+            clear_user_state(user_id)
+
+    elif current_state == 'ADD_BALANCE_AMOUNT':
+        target_user_id = context.user_data.get('target_user_id_for_add')
+        if not target_user_id:
+            await update.message.reply_text(
+                "Error: User ID not set for balance addition. Please start again from 'Add Balance to User'.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Admin Menu", callback_data='admin_main_menu')]])
+            )
+            clear_user_state(user_id)
+            return
+
+        try:
+            amount_to_add = float(text_input)
+            if amount_to_add <= 0:
+                await update.message.reply_text(
+                    "Amount must be positive.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Admin Menu", callback_data='admin_main_menu')]])
+                )
+                clear_user_state(user_id)
+                return
+
+            target_user = users.find_one({"user_id": target_user_id})
+            if target_user:
+                users.update_one(
+                    {"user_id": target_user_id},
+                    {"$inc": {"balance": amount_to_add}}
+                )
+                await update.message.reply_text(
+                    f"Successfully added ₹{amount_to_add:.2f} to user `{target_user_id}`'s balance.\n"
+                    f"New balance: ₹{target_user['balance'] + amount_to_add:.2f}",
+                    parse_mode='Markdown',
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Admin Menu", callback_data='admin_main_menu')]])
+                )
+            else:
+                await update.message.reply_text(
+                    "User not found.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Admin Menu", callback_data='admin_main_menu')]])
+                )
+        except ValueError:
+            await update.message.reply_text(
+                "Invalid amount. Please send a numeric value.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Admin Menu", callback_data='admin_main_menu')]])
+            )
+        finally:
+            clear_user_state(user_id)
+            if 'target_user_id_for_add' in context.user_data:
+                del context.user_data['target_user_id_for_add']
+
+    elif current_state == 'BROADCAST_MESSAGE':
+        message_to_broadcast = text_input
+        sent_count = 0
+        failed_count = 0
+        all_users = users.find({}, {"user_id": 1})
+
+        for user_doc in all_users:
+            try:
+                await context.bot.send_message(chat_id=user_doc['user_id'], text=message_to_broadcast)
+                sent_count += 1
+            except TelegramError as e:
+                if "blocked by the user" in str(e) or "user is deactivated" in str(e):
+                    logger.info(f"User {user_doc['user_id']} blocked the bot or is deactivated. Skipping.")
+                else:
+                    logger.warning(f"Failed to send broadcast to user {user_doc['user_id']}: {e}")
+                failed_count += 1
+            except Exception as e:
+                failed_count += 1
+                logger.warning(f"An unexpected error occurred sending broadcast to user {user_doc['user_id']}: {e}")
+
+        await update.message.reply_text(
+            f"✅ Broadcast complete!\n"
+            f"Sent to: {sent_count} users.\n"
+            f"Failed for: {failed_count} users.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Admin Menu", callback_data='admin_main_menu')]])
+        )
+        clear_user_state(user_id)
+
+
+# --- User Withdrawal Input Handler ---
+async def handle_withdrawal_input_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    current_state = get_user_state(user_id)
+    user = get_user(user_id)
+
+    # If not in a withdrawal state, or if balance is insufficient, ignore/reset
+    if not current_state or not current_state.startswith('WITHDRAW_') or user['balance'] < MIN_WITHDRAWAL:
+        if user['balance'] < MIN_WITHDRAWAL:
+            await update.message.reply_text(
+                f"❌ Your balance (₹{user['balance']:.2f}) is below the minimum withdrawal amount of ₹{MIN_WITHDRAWAL:.2f}.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Main Menu", callback_data='back_to_main')]])
+            )
+        clear_user_state(user_id)
+        return
+
+    # Proceed based on specific withdrawal state
+    if current_state == 'WITHDRAW_ENTER_UPI':
+        upi_id = update.message.text.strip()
+        withdrawal_details = {"method": "UPI ID", "id": upi_id}
+        await process_withdrawal_request(update, context, user_id, user['balance'], withdrawal_details)
+
+    elif current_state == 'WITHDRAW_ENTER_BANK':
+        bank_details_raw = update.message.text.strip()
+        if len(bank_details_raw) < 50:  # Simple check for minimum length
+            await update.message.reply_text(
+                "Please provide complete bank account details in the specified format.",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Cancel", callback_data='back_to_main')]])
+            )
+            return
+
+        withdrawal_details = {"method": "Bank Account", "details": bank_details_raw}
+        await process_withdrawal_request(update, context, user_id, user['balance'], withdrawal_details)
+
+    elif current_state == 'WITHDRAW_UPLOAD_QR':
+        if update.message.photo:
+            file_id = update.message.photo[-1].file_id
+            withdrawal_details = {"method": "QR Code", "file_id": file_id}
+            await process_withdrawal_request(update, context, user_id, user['balance'], withdrawal_details)
+        else:
+            await update.message.reply_text(
+                "Please upload a **photo** of your QR Code. Text messages are not accepted for QR code withdrawals.",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Cancel", callback_data='back_to_main')]])
+            )
+            return
+
+    else:
+        logger.warning(f"User {user_id} sent message while in unexpected state: {current_state}")
+        await update.message.reply_text(
+            "It looks like you're in an unexpected state. Please try again from the main menu or click 'Cancel'.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Main Menu", callback_data='back_to_main')]])
+        )
+        clear_user_state(user_id)
+
+
+async def process_withdrawal_request(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, amount: float, details: dict):
+    """Handles the common logic for creating and notifying about a withdrawal request."""
+    # Record the withdrawal request
+    request_data = {
+        "user_id": user_id,
+        "amount": amount,
+        "withdrawal_details": details,
+        "timestamp": datetime.utcnow(),
+        "status": "pending"
+    }
+    inserted_result = withdrawal_requests.insert_one(request_data)
+    request_obj_id = inserted_result.inserted_id
+
+    # DO NOT increment 'withdrawn' here. 'withdrawn' is incremented in admin_approve_payment
+    # when the balance is reset. This prevents double counting.
+
+    await update.message.reply_text(
+        f"🎉 Withdrawal request submitted!\n"
+        f"Amount: ₹{amount:.2f}\n"
+        f"Method: {details['method']}\n"
+        f"Your request has been sent to admin and will be processed soon. Your balance will be updated after admin approval.",  # Clarified message
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Main Menu", callback_data='back_to_main')]])
+    )
+
+    # Notify admin
+    admin_message = (
+        f"🚨 **New Withdrawal Request!** 🚨\n"
+        f"User ID: [`{user_id}`](tg://user?id={user_id})\n"
+        f"Amount: ₹{amount:.2f}\n"
+        f"Method: {details['method']}\n"
+    )
+
+    if details['method'] == "UPI ID":
+        admin_message += f"UPI ID: `{details['id']}`"
+    elif details['method'] == "Bank Account":
+        admin_message += f"Bank Details:\n```\n{details['details']}\n```"
+    elif details['method'] == "QR Code":
+        admin_message += f"QR Code File ID: `{details['file_id']}`\n(QR image sent separately below)"
+
+    admin_keyboard = [[InlineKeyboardButton("✅ Mark as Paid", callback_data=f"approve_payment_{request_obj_id}")]]
+
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=admin_message,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(admin_keyboard)
+        )
+        if details['method'] == "QR Code" and update.message.photo:
+            await context.bot.forward_message(
+                chat_id=ADMIN_ID,
+                from_chat_id=update.message.chat_id,
+                message_id=update.message.message_id
+            )
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"⬆️ Above QR code is for User ID `{user_id}` withdrawal (Request ID: `{request_obj_id}`).",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Open User Chat", url=f"tg://user?id={user_id}")]])
+            )
+
+    except TelegramError as e:
+        logger.error(f"Failed to notify admin {ADMIN_ID} about withdrawal request: {e}")
+    finally:
+        clear_user_state(user_id)
+
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.error("Exception while handling update:", exc_info=context.error)
+
+    if update:
+        if update.callback_query:
+            try:
+                await update.callback_query.message.reply_text('⚠️ An error occurred. Please try again.')
+            except Exception as e:
+                logger.error(f"Failed to send error message to callback_query user: {e}")
+        elif update.message:
+            try:
+                await update.message.reply_text('⚠️ An error occurred. Please try again.')
+            except Exception as e:
+                logger.error(f"Failed to send error message to message user: {e}")
+        else:
+            logger.warning(f"Error occurred with unhandled update type: {update}")
+    else:
+        logger.warning("Error handler called with None update object.")
+
+async def cleanup_old_data(context: ContextTypes.DEFAULT_TYPE):
+    application_instance = context.job.data["application_instance"]
+    logger.info("Attempting MongoDB data cleanup...")
+
+    # In a real scenario, you'd query MongoDB for storage stats.
+    # For now, let's assume it's high for the purpose of running cleanup.
+    # You might replace this with actual MongoDB storage stats check if available
+    db_usage_percentage = 95  # Placeholder
+
+    if db_usage_percentage >= 90:  # Only run cleanup if usage is high
+        logger.warning(f"MongoDB usage is at {db_usage_percentage:.2f}%. Initiating cleanup of old data.")
+
+        thirty_days_ago = datetime.utcnow() - timedelta(days=30)
+
+        users_to_delete_cursor = users.find({
+            "balance": 0.0,
+            "user_id": {"$ne": ADMIN_ID},
+            "$or": [
+                {"created_at": {"$lt": thirty_days_ago}},
+                {"last_click": {"$lt": thirty_days_ago}}
+            ]
+        }).sort("created_at", 1)
+
+        users_to_delete = list(users_to_delete_cursor)
+
+        if not users_to_delete:
+            logger.info("No suitable non-admin users with 0 balance and inactivity found for cleanup.")
+            return
+
+        num_to_delete = max(1, int(len(users_to_delete) * 0.20))
+        users_to_delete = users_to_delete[:num_to_delete]
+
+        deleted_count = 0
+        deleted_user_ids = []
+        for user_doc in users_to_delete:
+            if user_doc['user_id'] == ADMIN_ID or user_doc['balance'] > 0.0:
+                logger.warning(f"Attempted to delete user {user_doc['user_id']} with non-zero balance or ADMIN_ID during cleanup. Skipping.")
+                continue
+
+            try:
+                users.delete_one({"_id": user_doc['_id']})
+                user_states.delete_one({"user_id": user_doc['user_id']})
+                deleted_count += 1
+                deleted_user_ids.append(user_doc['user_id'])
+            except Exception as e:
+                logger.error(f"Error deleting user {user_doc['user_id']} during cleanup: {e}")
+
+        logger.info(f"MongoDB cleanup complete. Deleted {deleted_count} users. User IDs: {deleted_user_ids}")
+
+        admin_msg = f"🧹 **MongoDB Cleanup Alert!** 🧹\n" \
+                    f"Database usage was high ({db_usage_percentage:.2f}%).\n" \
+                    f"{deleted_count} oldest *inactive users with 0 balance* have been deleted to free up space.\n" \
+                    f"Deleted User IDs: {', '.join(map(str, deleted_user_ids)) if deleted_user_ids else 'None'}"
+        try:
+            await application_instance.bot.send_message(
+                chat_id=ADMIN_ID, text=admin_msg, parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Failed to send cleanup notification to admin: {e}")
+    else:
+        logger.info(f"MongoDB usage is at {db_usage_percentage:.2f}%, no cleanup needed yet.")
+
+
+# Initialize the Application globally
+application = Application.builder().token(TOKEN).build()
+
+# Add handlers
+application.add_handler(CommandHandler('start', start))
+application.add_handler(CommandHandler('admin', admin_command, filters=filters.User(ADMIN_ID)))
+application.add_handler(CommandHandler('broadcast', broadcast_command, filters=filters.User(ADMIN_ID)))
+application.add_handler(CommandHandler('stats', stats_command, filters=filters.User(ADMIN_ID)))
+application.add_handler(CallbackQueryHandler(button_handler))
+
+# Admin input handling (text messages when in specific admin states)
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID), handle_admin_input))
+
+# User withdrawal input handling (text/photo messages when in specific withdrawal states)
+application.add_handler(MessageHandler(
+    (filters.TEXT | filters.PHOTO) & ~filters.COMMAND & ~filters.User(ADMIN_ID),
+    handle_withdrawal_input_wrapper
+))
+
+application.add_error_handler(error_handler)
+
+# Setup job queue for cleanup
+job_queue = application.job_queue
+if job_queue is not None:
+    job_queue.run_repeating(cleanup_old_data, interval=timedelta(days=1), first=0,
+                            data={"application_instance": application})  # Changed to daily for less frequent polling
+else:
+    logger.error("JobQueue is not initialized. Ensure python-telegram-bot[job-queue] is installed.")
+
+
+# Flask routes for health check ONLY
+@app.route('/')
+def health_check():
+    return "EarnBot is running!"
+
+# NO WEBHOOK ROUTE HERE
+
+def run_flask_server():
+    """Runs the Flask health check server."""
+    PORT = int(os.environ.get('PORT', 8000))
+    logger.info(f"Starting Flask server on port {PORT}")
+    # Using a simple development server for health check.
+    # For production, consider using Gunicorn or similar.
+    app.run(host='0.0.0.0', port=PORT, debug=False)
+
+if __name__ == '__main__':
+    # 1. Start the Flask server in a separate thread.
+    # This thread will handle health check requests.
+    flask_server_thread = Thread(target=run_flask_server)
+    flask_server_thread.daemon = True  # Allows thread to exit when main program exits
+    flask_server_thread.start()
+
+    logger.info("Starting Telegram bot in polling mode.")
+    # 2. Start the Telegram bot in polling mode in the main thread.
+    # This will block the main thread, but Flask is running in a separate thread.
+    try:
+        application.run_polling(poll_interval=1, timeout=30)  # Poll every 1 second, with a 30 second timeout
+    except KeyboardInterrupt:
+        logger.info("Bot process interrupted. Shutting down.")
+        application.stop()  # Stop the PTB application
+        client.close()  # Close MongoDB connection
+    except Exception as e:
+        logger.critical(f"An unhandled error occurred in the polling loop: {e}", exc_info=True)
+        application.stop()
+        client.close()
