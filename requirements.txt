@@ -7,8 +7,8 @@ beautifulsoup4==4.12.2
 tgcrypto==1.2.5
 flask==2.3.2
 bs4==0.0.1
-yt-dlp==2025.6.30  # Updated to latest stable version
+yt-dlp>=2024.6.22  # Flexible version to avoid missing releases
 aiohttp==3.9.5
 aiodns==3.2.0
-Pillow>=10.0.0  # Flexible version to avoid build errors
-humanreadable==2.1.2
+Pillow>=10.0.0  # Flexible version for Python 3.13
+humanreadable>=0.4.1  # Updated to latest available version
