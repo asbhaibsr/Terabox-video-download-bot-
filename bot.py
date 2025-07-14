@@ -55,20 +55,21 @@ except Exception as e:
 # Initialize Pyrogram client
 app = Client("terabox_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# Terabox Downloader Function (Free Method)
+# Updated Terabox Downloader Function with working APIs
 async def download_terabox_file(url):
     try:
-        # Using free terabox downloader website (example)
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
         }
         
-        # Step 1: Extract direct download link from free service
-        response = requests.get(f"https://teraboxdownloader.net/api?url={url}", headers=headers)
+        # Try first working API
+        api1 = f"https://terabox-dl.qtcloud.workers.dev/api?url={url}"
+        response = requests.get(api1, headers=headers, timeout=30)
         
         if response.status_code == 200:
             data = response.json()
-            if data.get("status") == "success":
+            if data.get("download_url"):
                 return {
                     "success": True,
                     "download_url": data["download_url"],
@@ -76,9 +77,24 @@ async def download_terabox_file(url):
                     "file_size": data.get("file_size", "N/A")
                 }
         
-        # Alternative method if first fails
-        soup = BeautifulSoup(requests.get(f"https://www.teraboxdownload.com/?url={url}").content, "html.parser")
-        download_btn = soup.find("a", {"id": "download_button"})
+        # Try second working API if first fails
+        api2 = f"https://teraboxapi.com/api?url={url}"
+        response = requests.get(api2, headers=headers, timeout=30)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("direct_link"):
+                return {
+                    "success": True,
+                    "download_url": data["direct_link"],
+                    "file_name": data.get("file_name", "terabox_file"),
+                    "file_size": data.get("file_size", "N/A")
+                }
+        
+        # Try third alternative
+        api3 = f"https://youtube4kdownloader.com/terabox-downloader/?url={url}"
+        soup = BeautifulSoup(requests.get(api3, headers=headers).content, "html.parser")
+        download_btn = soup.find("a", {"class": "download-btn"})
         if download_btn and download_btn.get("href"):
             return {
                 "success": True,
@@ -87,9 +103,9 @@ async def download_terabox_file(url):
                 "file_size": "N/A"
             }
             
-        return {"success": False, "error": "Failed to get free download link"}
+        return {"success": False, "error": "Failed to get download link from all sources"}
     except Exception as e:
-        logger.error(f"Free terabox download error: {e}")
+        logger.error(f"Terabox download error: {e}")
         return {"success": False, "error": str(e)}
 
 @app.on_message(filters.command("start"))
