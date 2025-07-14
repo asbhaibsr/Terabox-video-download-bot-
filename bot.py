@@ -37,8 +37,8 @@ API_ID = int(os.getenv("API_ID", 12345))
 API_HASH = os.getenv("API_HASH", "your_api_hash_here")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "your_bot_token_here")
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-FORCE_SUB_CHANNEL = "asbhai_bsr"
-FORCE_SUB_GROUP = "aschat_group"
+SUPPORT_GROUP = "aschat_group"
+UPDATE_CHANNEL = "asbhai_bsr"
 ADMIN_ID = 7315805581
 DAILY_FREE_LIMIT = 5
 
@@ -92,51 +92,27 @@ async def download_terabox_file(url):
         logger.error(f"Free terabox download error: {e}")
         return {"success": False, "error": str(e)}
 
-# Improved subscription check
-async def is_user_subscribed(user_id):
-    try:
-        channel_member = await app.get_chat_member(FORCE_SUB_CHANNEL, user_id)
-        group_member = await app.get_chat_member(FORCE_SUB_GROUP, user_id)
-        
-        channel_joined = channel_member.status in ["member", "administrator", "creator"]
-        group_joined = group_member.status in ["member", "administrator", "creator"]
-        
-        return channel_joined and group_joined
-    except Exception as e:
-        logger.error(f"Subscription check error: {e}")
-        return False
-
 @app.on_message(filters.command("start"))
 async def start(client, message):
-    user_id = message.from_user.id
-    if not await is_user_subscribed(user_id):
-        buttons = [
-            [
-                InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_SUB_CHANNEL}"),
-                InlineKeyboardButton("👥 Join Group", url=f"https://t.me/{FORCE_SUB_GROUP}")
-            ],
-            [InlineKeyboardButton("🔄 Check Subscription", callback_data="check_sub")]
-        ]
-        await message.reply_text(
-            "📢 Please join both our channel and group to use this bot",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-        return
+    buttons = [
+        [
+            InlineKeyboardButton("📢 Updates Channel", url=f"https://t.me/{UPDATE_CHANNEL}"),
+            InlineKeyboardButton("👥 Support Group", url=f"https://t.me/{SUPPORT_GROUP}")
+        ],
+        [InlineKeyboardButton("❓ How to Download", callback_data="help_download")]
+    ]
     
     await message.reply_text(
         "👋 Welcome to Terabox Downloader Bot!\n\n"
         "🔗 Send me any Terabox link to download the file\n\n"
-        "⚠️ Note: This is free service, download speed may be slow"
+        "⚠️ Note: This is free service, download speed may be slow",
+        reply_markup=InlineKeyboardMarkup(buttons)
     )
 
 @app.on_message(filters.regex(r'https?://[^\s]+'))
 async def handle_terabox_link(client, message):
     try:
         user_id = message.from_user.id
-        if not await is_user_subscribed(user_id):
-            await message.reply_text("❌ Please join our channel and group first")
-            return
-        
         url = message.text
         if "terabox" not in url.lower() and "teraboxapp" not in url.lower():
             await message.reply_text("❌ Please send a valid Terabox link")
@@ -178,7 +154,10 @@ async def handle_terabox_link(client, message):
             f"⚠️ Note: Free download links may expire quickly",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⬇️ Download Now", url=download_url)],
-                [InlineKeyboardButton("🔄 New Download", callback_data="new_download")]
+                [
+                    InlineKeyboardButton("📢 Updates", url=f"https://t.me/{UPDATE_CHANNEL}"),
+                    InlineKeyboardButton("👥 Support", url=f"https://t.me/{SUPPORT_GROUP}")
+                ]
             ])
         )
         
@@ -186,18 +165,19 @@ async def handle_terabox_link(client, message):
         logger.error(f"Error handling Terabox link: {e}")
         await message.reply_text("❌ An error occurred. Please try again later.")
 
-@app.on_callback_query(filters.regex("^check_sub$"))
-async def check_sub(client, callback_query):
-    user_id = callback_query.from_user.id
-    if await is_user_subscribed(user_id):
-        await callback_query.answer("✅ You're subscribed!", show_alert=True)
-        await callback_query.message.delete()
-        await callback_query.message.reply_text(
-            "🎉 Thanks for subscribing!\n\n"
-            "Now you can send me Terabox links to download files."
-        )
-    else:
-        await callback_query.answer("❌ You're not subscribed to both channel and group", show_alert=True)
+@app.on_callback_query(filters.regex("^help_download$"))
+async def help_download(client, callback_query):
+    help_text = (
+        "📹 How to Download Videos:\n\n"
+        "1. Open Terabox app or website\n"
+        "2. Find the video you want to download\n"
+        "3. Click 'Share' and copy the link\n"
+        "4. Paste that link here in the bot\n"
+        "5. Wait for processing and click the download button\n\n"
+        "For any issues, contact @aschat_group"
+    )
+    await callback_query.answer()
+    await callback_query.message.reply_text(help_text)
 
 if __name__ == "__main__":
     logger.info("Starting Free Terabox Downloader Bot...")
